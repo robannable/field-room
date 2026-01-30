@@ -1,6 +1,6 @@
 # Architecture
 
-How Field Room enables multi-user collaboration with Clawdbot.
+How Field Room enables multi-user collaboration with OpenClaw.
 
 ## Design Philosophy
 
@@ -29,7 +29,8 @@ How Field Room enables multi-user collaboration with Clawdbot.
 - Accept WebSocket connections from clients
 - Authenticate users
 - Broadcast messages to all participants
-- Forward invocations to Clawdbot
+- Detect @mentions and route to OpenClaw Gateway
+- Build conversation context for AI requests
 - Persist state to files
 - Track presence (who's online, where they are)
 
@@ -39,19 +40,21 @@ How Field Room enables multi-user collaboration with Clawdbot.
 
 ---
 
-### 2. Clawdbot Gateway
+### 2. OpenClaw Gateway
 
-**Location:** External (Clawdbot installation)
+**Location:** External (OpenClaw installation)
 
 **Responsibilities:**
+- Serve `/v1/chat/completions` API (OpenAI-compatible)
 - Manage AI sessions
 - Execute tools (web search, file ops, etc.)
 - Store memory (MEMORY.md, daily logs)
-- Provide HTTP API for sending messages
 
-**Key insight:** Clawdbot doesn't know about the room. The sync service translates invocations into session messages.
+**Key insight:** The Gateway doesn't know about the room. The sync service translates invocations into chat completion requests, sending recent conversation as context.
 
-**Technology:** Clawdbot agent framework
+**Integration:** The sync service calls `POST /v1/chat/completions` with Bearer token authentication. The `user` field is set to a stable session identifier so repeated calls share context within the Gateway.
+
+**Technology:** OpenClaw agent framework (port 18789)
 
 ---
 
@@ -74,7 +77,7 @@ workspace/
 - **Git-friendly** — Version control everything
 - **Inspectable** — Open state.json in editor
 - **Portable** — Copy workspace = copy project
-- **Clawdbot-native** — Matches how Clawdbot works
+- **OpenClaw-native** — Matches how OpenClaw works
 
 ---
 
@@ -84,9 +87,9 @@ workspace/
 
 **Responsibilities:**
 - Connect to sync service via WebSocket
-- Render chat, presence, drawings
+- Render chat, presence, typing indicators
 - Send user input (chat, commands, drawings)
-- Display Clawdbot responses
+- Display AI responses
 
 **Key insight:** The UI is **decoupled**. You can build:
 - Web app (React, Vue, Svelte)
@@ -114,29 +117,32 @@ User A                    Sync Service                 User B
 
 ---
 
-### Invoke Clawdbot
+### AI Invocation (via Mention)
 
 ```
-User A              Sync Service           Clawdbot          User B
-  │                      │                    │                │
-  ├─ invoke ───────────>                      │                │
-  │  "@trillian ..."     ├─ HTTP POST ───────>                │
-  │                      │   /sessions/send   │                │
-  │                      <─────────────────────┤                │
-  │                      │   { response }     │                │
-  │                      ├─ broadcast ────────────────────────>
-  │                      │   clawdbot msg     │                │
-  <──────────────────────┤                    │                │
+User A              Sync Service           OpenClaw Gateway     User B
+  │                      │                       │                │
+  ├─ chat ──────────────>                        │                │
+  │  "@pauline ..."      │                       │                │
+  │                      ├─ detect mention        │                │
+  │                      ├─ build context         │                │
+  │                      ├─ POST /v1/chat/ ──────>                │
+  │                      │   completions          │                │
+  │                      <────────────────────────┤                │
+  │                      │   { response }         │                │
+  │                      ├─ broadcast ────────────────────────────>
+  │                      │   ai_response          │                │
+  <──────────────────────┤                        │                │
 ```
 
 **Flow:**
-1. User sends invoke message
-2. Sync service forwards to Clawdbot Gateway HTTP API
-3. Clawdbot processes (may use tools, search, etc.)
-4. Response comes back to sync service
-5. Sync service broadcasts to all users
+1. User sends a chat message mentioning the AI
+2. Sync service detects the mention (regex on AI name)
+3. Builds an OpenAI-compatible messages array from recent chat history
+4. Sends to Gateway's `/v1/chat/completions` with Bearer auth
+5. Broadcasts the response to all users as `ai_response`
 
-**Key insight:** Everyone sees Clawdbot's response, not just the requester.
+**Key insight:** Everyone sees the AI's response, not just the requester. The AI gets conversation context, not just the single message.
 
 ---
 
@@ -173,9 +179,6 @@ Sync service tracks:
 **Broadcast on:**
 - User joins/leaves
 - User moves location
-- Periodic heartbeat
-
-**Displayed in UI** — "Who's online, where are they?"
 
 ---
 
@@ -185,13 +188,28 @@ See [API.md](API.md) for full protocol.
 
 **Core types:**
 - `auth` — Join room
-- `chat` — Human-to-human message
-- `invoke` — Request to Clawdbot
-- `clawdbot` — Response from AI
+- `chat` — Human-to-human message (also triggers AI if mentioned)
+- `invoke` — Explicit request to AI
+- `ai_response` — Response from AI
+- `typing` — AI is processing
 - `move` — Location update
 - `drawing` — Save/update drawing
 - `state_update` — Arbitrary state change
 - `presence` — Online users list
+
+---
+
+## AI Context System
+
+When the AI is mentioned, the sync service builds a messages array:
+
+1. **System message** — Sets AI identity and room context
+2. **Recent chat** — Last N messages (configurable via `CONTEXT_MESSAGES`)
+   - Human messages → `role: "user"` with `"username: text"` format
+   - AI messages → `role: "assistant"`
+3. **Current message** — The triggering mention
+
+This gives the AI conversational awareness — it can follow threads, reference earlier messages, and respond contextually.
 
 ---
 
@@ -200,23 +218,25 @@ See [API.md](API.md) for full protocol.
 ```
 field-room/
 ├── clawdbot-connector/        # Reusable backend
-│   ├── sync-service.js        # WebSocket server
-│   ├── clawdbot-client.js     # AI participant connector
+│   ├── sync-service.js        # WebSocket room server + AI routing
+│   ├── clawdbot-client.js     # AI participant connector (optional)
 │   ├── package.json
 │   └── README.md
 │
 ├── examples/
 │   └── field-mapping/         # Example implementation
-│       ├── client/            # Web UI
-│       │   ├── index.html
-│       │   └── client.js
-│       └── workspace/         # File storage
+│       └── client/            # Web UI
+│           ├── index.html
+│           └── client.js
 │
 ├── docs/
 │   ├── QUICKSTART.md
 │   ├── API.md
-│   └── ARCHITECTURE.md        # This file
+│   ├── ARCHITECTURE.md        # This file
+│   ├── LAN-TESTING.md
+│   └── VPS-DEPLOYMENT.md
 │
+├── .env.example               # Configuration template
 └── README.md
 ```
 
@@ -231,53 +251,28 @@ field-room/
 
 ### Pattern 1: Co-located Team
 
-**Use case:** Everyone exploring the same site together.
-
 ```
 Rob: I'm at the north entrance
 Sarah: I see you! Look at this drainage issue
-@trillian what's the flood risk here?
-Trillian: Flood Zone 2, medium risk...
+@pauline what's the flood risk here?
+Pauline: Flood Zone 2, medium risk...
 ```
-
-**Features:**
-- Real-time presence on map
-- Shared annotations
-- Ambient AI support
-
----
 
 ### Pattern 2: Distributed Team
 
-**Use case:** Team members in different locations.
-
 ```
-Rob (London): @trillian research Birmingham planning apps
-Trillian: Found 12 applications...
+Rob (London): @pauline research Birmingham planning apps
+Pauline: Found 12 applications...
 Sarah (Birmingham): I can verify those on-site
 ```
 
-**Features:**
-- Async collaboration
-- AI does research while humans work
-- Persistent context
-
----
-
 ### Pattern 3: Human + AI Pair
 
-**Use case:** Solo user with AI assistant.
-
 ```
-Rob: @trillian I'm surveying this site, what should I look for?
-Trillian: Check for: 1) Boundary markers, 2) Access routes, 3) ...
+Rob: @pauline I'm surveying this site, what should I look for?
+Pauline: Check for: 1) Boundary markers, 2) Access routes, 3) ...
 Rob: Found the markers, adding photos
 ```
-
-**Features:**
-- Conversational workflow
-- AI remembers context
-- Mix of chat and commands
 
 ---
 
@@ -291,11 +286,7 @@ Rob: Found the markers, adding photos
 
 **Supports:** ~10-50 concurrent users comfortably
 
----
-
 ### Future Scaling
-
-**For 100s of users:**
 
 1. **Room sharding** — Separate rooms per project/site
 2. **Redis pub/sub** — Multi-instance sync services
@@ -303,298 +294,58 @@ Rob: Found the markers, adding photos
 4. **CDN** — Serve static assets
 5. **Load balancer** — Multiple sync service instances
 
-**Example with Redis:**
-```javascript
-// Each sync service subscribes to room channels
-redis.subscribe('field-room:site-a');
-redis.on('message', (channel, msg) => {
-  broadcast(JSON.parse(msg));
-});
-```
-
 ---
 
 ## Security Model
 
 ### Current (Development)
 
-⚠️ **No authentication or encryption**
+⚠️ **No client authentication or encryption**
 
-- Any client can connect
+- Any client can connect to the sync service
 - Any user ID can be claimed
 - WebSocket is unencrypted
 - No rate limiting
 
-**Acceptable for:** Local network, trusted users, prototyping
+**The sync service authenticates to OpenClaw Gateway** via Bearer token. Gateway credentials are not exposed to clients.
 
----
+**Acceptable for:** Local network, trusted users, prototyping
 
 ### Production Hardening
 
-**Must add:**
-
-1. **Authentication**
-   - JWT tokens
-   - OAuth integration
-   - Session management
-
-2. **Authorization**
-   - User roles (admin, member, viewer)
-   - Room access control
-   - Feature permissions
-
-3. **Encryption**
-   - WSS (WebSocket Secure)
-   - HTTPS for HTTP endpoints
-   - TLS 1.3+
-
-4. **Rate Limiting**
-   - Per-user message limits
-   - Invocation throttling
-   - Upload size restrictions
-
-5. **Validation**
-   - Input sanitization
-   - Schema validation (Zod, Joi)
-   - GeoJSON validation
-
-**Example auth flow:**
-```javascript
-ws.on('connection', async (ws, req) => {
-  const token = parseToken(req.headers.authorization);
-  const user = await verifyToken(token);
-  if (!user) {
-    ws.close(1008, 'Unauthorized');
-    return;
-  }
-  // Continue with authenticated user
-});
-```
+See [VPS-DEPLOYMENT.md](VPS-DEPLOYMENT.md) for:
+- Token-based client auth
+- WSS (WebSocket Secure) via nginx
+- Firewall rules
+- Rate limiting
+- Input validation
 
 ---
 
-## Extension Points
+## OpenClaw Integration Details
 
-### Custom Message Types
+### Session Routing
 
-Add your own:
-
-```javascript
-// In sync-service.js
-case 'my_custom_type':
-  await handleMyCustomType(clientId, msg);
-  break;
-```
-
-**Example: Voice notes**
-```javascript
-{
-  type: 'voice_note',
-  audioUrl: 'https://...',
-  duration: 45
-}
-```
-
----
-
-### External Integrations
-
-**Planning API:**
-```javascript
-case 'invoke':
-  if (msg.command.includes('planning')) {
-    const data = await fetchPlanningData(location);
-    broadcast({ type: 'planning_data', data });
-  }
-  // Then forward to Clawdbot
-```
-
-**Weather:**
-```javascript
-setInterval(async () => {
-  const weather = await fetchWeather(location);
-  broadcast({ type: 'weather_update', weather });
-}, 300000); // Every 5 mins
-```
-
----
-
-### Database Integration
-
-**Optional:** Use PostgreSQL/SQLite instead of JSON files:
-
-```javascript
-async function saveDrawing(drawing) {
-  await db.query(`
-    INSERT INTO drawings (id, data, created_by)
-    VALUES ($1, $2, $3)
-  `, [drawing.id, JSON.stringify(drawing), drawing.createdBy]);
-}
-```
-
-**Tradeoffs:**
-- ✅ Better for high-frequency updates
-- ✅ Structured queries
-- ❌ Less inspectable
-- ❌ Harder to version control
-
----
-
-## Clawdbot Integration Details
-
-### Session Per User vs Shared Session
-
-**Option A: One session for all users**
-```
-All users → Sync Service → Single Clawdbot session
-```
-
-- ✅ Simple
-- ✅ Shared context
-- ❌ Can't distinguish users
-
-**Option B: Session per user**
-```
-User A → Sync Service → Clawdbot Session A
-User B → Sync Service → Clawdbot Session B
-```
-
-- ✅ Personal context
-- ✅ User-specific memory
-- ❌ More sessions to manage
-
-**Current implementation:** Shared session (configurable)
-
----
-
-### Ambient Context
-
-**Should Clawdbot see all chat?**
-
-**Pros:**
-- Rich context for responses
-- Can proactively chime in
-- Understands conversation flow
-
-**Cons:**
-- Token usage increases
-- Privacy concerns
-- Noise in context
-
-**Current:** Disabled by default, enable with:
-
-```javascript
-// In sync-service.js, uncomment:
-await sendToClawdbot(`[Ambient] ${chatMsg.from}: ${chatMsg.text}`);
-```
-
----
-
-## Performance Characteristics
-
-**Latency:**
-- Human chat: <50ms (WebSocket broadcast)
-- Clawdbot invoke: 1-5s (depends on complexity)
-- Drawing sync: <100ms (file write + broadcast)
-
-**Throughput:**
-- Chat: Thousands of messages/second
-- Invocations: Limited by Clawdbot (sequential)
-- File ops: Depends on disk I/O
-
-**Memory:**
-- ~10MB base
-- +1-2MB per connected client
-- Chat history capped at 100 messages
-
----
-
-## Future Directions
-
-### Voice Integration
-
-Real-time voice chat + transcription:
+The sync service uses the `user` field in chat completion requests to maintain a stable session:
 
 ```javascript
 {
-  type: 'voice',
-  userId: 'rob',
-  audioStream: '...',
-  transcription: '...'  // Live transcription
+  model: 'openclaw:main',
+  user: 'field-room',  // Stable session key
+  messages: [...]
 }
 ```
 
-### 3D Avatar Presence
+This means repeated calls share context within the Gateway — the AI remembers the conversation across invocations.
 
-Track orientation and gestures in 3D space:
+### Conversation Context
 
-```javascript
-{
-  type: 'avatar_update',
-  userId: 'rob',
-  position: [x, y, z],
-  rotation: [pitch, yaw, roll],
-  gesture: 'pointing'
-}
-```
+The sync service sends the last N messages (default 10) as context. This means:
+- AI can follow multi-turn conversations
+- AI sees what other humans said
+- AI sees its own previous responses
 
-### Persistent Drawings with History
-
-Version control for drawings (like git):
-
-```javascript
-{
-  type: 'drawing',
-  drawing: {
-    id: 'boundary-1',
-    version: 3,
-    history: [...]
-  }
-}
-```
-
-### Multi-Room Support
-
-One sync service, multiple rooms:
-
-```javascript
-{
-  type: 'auth',
-  userId: 'rob',
-  roomId: 'site-a'  // Join specific room
-}
-```
-
----
-
-## Comparison to Alternatives
-
-### vs Traditional Chatbot
-
-| Traditional | Field Room |
-|-------------|------------|
-| 1:1 conversation | Multi-user room |
-| No shared state | Persistent workspace |
-| Command → Response | Ambient participation |
-| No presence | Real-time presence |
-
-### vs Slack/Discord Bot
-
-| Slack Bot | Field Room |
-|-----------|------------|
-| Platform-specific | UI-agnostic |
-| Message-centric | State-centric |
-| Limited file handling | Native workspace |
-| External to workflow | Embedded in workflow |
-
-### vs Custom Backend
-
-| Custom Backend | Field Room |
-|----------------|------------|
-| Build everything | Reusable connector |
-| Database required | File-based |
-| Complex scaling | Simple to start |
-| Roll your own AI | Clawdbot integration |
+**Tradeoff:** More context = better responses but higher token usage.
 
 ---
 
@@ -611,8 +362,6 @@ One sync service, multiple rooms:
 
 ## Summary
 
-Field Room creates a **shared workspace** where humans and AI collaborate naturally. The sync service is the room, Clawdbot is a participant, and clients are windows into that space.
+Field Room creates a **shared workspace** where humans and AI collaborate naturally. The sync service is the room, OpenClaw is the intelligence, and clients are windows into that space.
 
 **Core innovation:** Treating AI as an ambient participant in a persistent multi-user environment, not a request-response service.
-
-**Next:** Build your UI, connect to the sync service, and create unique collaborative experiences.

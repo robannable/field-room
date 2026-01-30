@@ -56,6 +56,8 @@ Send a message to all users:
 }
 ```
 
+If the message mentions the AI user (e.g., `@pauline`), the sync service automatically detects this and forwards the message to OpenClaw along with recent conversation context.
+
 **Broadcast:** All clients receive the message with:
 ```javascript
 {
@@ -64,32 +66,6 @@ Send a message to all users:
   "from": "rob",
   "text": "Hello everyone",
   "timestamp": 1738222800000
-}
-```
-
----
-
-### Invoke
-
-Send a command to Clawdbot:
-
-```javascript
-{
-  "type": "invoke",
-  "command": "@trillian research planning constraints",
-  "id": "xyz789"             // Optional: for tracking responses
-}
-```
-
-**Broadcast:** All clients receive Clawdbot's response:
-```javascript
-{
-  "type": "clawdbot",
-  "id": "response123",
-  "from": "trillian",
-  "text": "Found 3 planning applications...",
-  "inReplyTo": "xyz789",     // If request had an ID
-  "timestamp": 1738222805000
 }
 ```
 
@@ -235,7 +211,7 @@ Recent chat messages (sent after auth):
   "type": "history",
   "messages": [
     { "type": "chat", "from": "sarah", "text": "...", "timestamp": ... },
-    { "type": "clawdbot", "from": "trillian", "text": "...", "timestamp": ... }
+    { "type": "ai_response", "from": "pauline", "text": "...", "timestamp": ... }
   ]
 }
 ```
@@ -258,20 +234,22 @@ User message:
 
 ---
 
-### Clawdbot
+### AI Response
 
 AI response:
 
 ```javascript
 {
-  "type": "clawdbot",
+  "type": "ai_response",
   "id": "def456",
-  "from": "trillian",
+  "from": "pauline",
   "text": "Found 3 planning applications within 500m...",
-  "inReplyTo": "abc123",     // Optional: ID of original invoke
+  "inReplyTo": "abc123",     // Optional: ID of original message
   "timestamp": 1738222805000
 }
 ```
+
+(The AI user name defaults to "pauline" but is configurable via `AI_USER_ID`.)
 
 ---
 
@@ -291,7 +269,7 @@ List of online users (sent periodically or on change):
       "lastSeen": 1738222800000
     },
     {
-      "userId": "trillian",
+      "userId": "pauline",
       "userType": "ai",
       "location": null,
       "status": "online",
@@ -384,7 +362,7 @@ User is typing (optional feature):
 ```javascript
 {
   "type": "typing",
-  "userId": "trillian",
+  "userId": "pauline",
   "timestamp": 1738222800000
 }
 ```
@@ -398,7 +376,7 @@ Error occurred:
 ```javascript
 {
   "type": "error",
-  "error": "Failed to invoke Clawdbot: timeout",
+  "error": "Failed to invoke OpenClaw: timeout",
   "timestamp": 1738222800000
 }
 ```
@@ -464,7 +442,7 @@ ws.onmessage = (event) => {
   
   if (msg.type === 'chat') {
     console.log(`${msg.from}: ${msg.text}`);
-  } else if (msg.type === 'clawdbot') {
+  } else if (msg.type === 'ai_response') {
     console.log(`AI: ${msg.text}`);
   }
 };
@@ -474,36 +452,35 @@ function chat(text) {
   ws.send(JSON.stringify({ type: 'chat', text }));
 }
 
-// Invoke AI
-function invoke(command) {
-  ws.send(JSON.stringify({ type: 'invoke', command }));
+// Mention AI in chat (detected automatically by sync service)
+function askAI(question) {
+  ws.send(JSON.stringify({ type: 'chat', text: `@pauline ${question}` }));
 }
 ```
 
 ---
 
-## Clawdbot Integration
+## OpenClaw Integration
 
-The sync service forwards invocations to Clawdbot via HTTP:
+The sync service detects AI mentions in regular chat messages and forwards them to OpenClaw via the OpenAI-compatible API:
 
-**Endpoint:** `POST http://localhost:3737/api/sessions/send`
+**Endpoint:** `POST http://localhost:18789/v1/chat/completions`
+
+**Authentication:** Bearer token via `Authorization` header.
 
 **Request:**
 ```json
 {
-  "sessionKey": "field-room",
-  "message": "@trillian research planning constraints"
+  "messages": [
+    { "role": "user", "content": "previous message for context" },
+    { "role": "user", "content": "@pauline research planning constraints" }
+  ]
 }
 ```
 
-**Response:**
-```json
-{
-  "response": "Found 3 planning applications within 500m..."
-}
-```
+**Response:** Standard OpenAI chat completions format.
 
-The sync service then broadcasts this response to all clients as a `clawdbot` message.
+The sync service builds conversation context from the last N messages (configurable via `CONTEXT_MESSAGES`) and broadcasts the AI response to all clients as an `ai_response` message.
 
 ---
 

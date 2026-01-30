@@ -1,8 +1,8 @@
-# Clawdbot Connector
+# OpenClaw Connector
 
-**Reusable backend for multi-user Clawdbot applications**
+**Reusable backend for multi-user OpenClaw applications**
 
-This directory contains the core backend components that enable any UI to connect to Clawdbot with real-time multi-user collaboration.
+This directory contains the core backend components that enable any UI to connect to OpenClaw with real-time multi-user collaboration.
 
 ## Components
 
@@ -10,17 +10,18 @@ This directory contains the core backend components that enable any UI to connec
 WebSocket server that manages:
 - **Chat** — Human-to-human messaging
 - **Presence** — Who's online, where they are
-- **Invocations** — Forward commands to Clawdbot
+- **Mention detection** — Detects AI mentions in regular chat and forwards to OpenClaw
+- **Context building** — Sends last N messages as conversation context
 - **State sync** — Broadcast changes (drawings, annotations, etc.)
 - **History** — Recent chat for late joiners
 
 ### 2. `clawdbot-client.js` - AI Participant (Optional)
-Connects a Clawdbot session to the room as an active participant. Use this if you want Clawdbot to:
+Connects an OpenClaw session to the room as an active participant. Use this if you want OpenClaw to:
 - See ambient chat
 - Announce proactively
 - Respond automatically to mentions
 
-**Not required** — The sync service can forward invocations directly to Clawdbot without this.
+**Not required** — The sync service can forward invocations directly to OpenClaw without this.
 
 ## Installation
 
@@ -39,19 +40,20 @@ npm start
 **With custom config:**
 ```bash
 SYNC_PORT=3738 \
-CLAWDBOT_API=http://localhost:3737 \
+OPENCLAW_API=http://localhost:18789 \
+OPENCLAW_TOKEN=your-bearer-token \
 WORKSPACE_PATH=./my-workspace \
-AI_USER_ID=my-ai \
+AI_USER_ID=pauline \
 npm start
 ```
 
-### Connect Clawdbot (Optional)
+### Connect OpenClaw Client (Optional)
 
 ```bash
 node clawdbot-client.js
 ```
 
-**Or run in background from Clawdbot:**
+**Or run in background:**
 ```bash
 cd /path/to/clawdbot-connector
 node clawdbot-client.js > /tmp/clawdbot-client.log 2>&1 &
@@ -64,10 +66,12 @@ node clawdbot-client.js > /tmp/clawdbot-client.log 2>&1 &
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SYNC_PORT` | `3738` | WebSocket server port |
-| `CLAWDBOT_API` | `http://localhost:3737` | Clawdbot Gateway URL |
+| `OPENCLAW_API` | `http://localhost:18789` | OpenClaw Gateway URL |
+| `OPENCLAW_TOKEN` | — | Bearer token for Gateway authentication |
+| `AI_USER_ID` | `pauline` | AI participant name (configurable) |
+| `AI_SESSION_USER` | — | OpenClaw session user |
+| `CONTEXT_MESSAGES` | — | Number of recent messages to include as context |
 | `WORKSPACE_PATH` | `./workspace` | File storage location |
-| `AI_USER_ID` | `trillian` | AI participant name |
-| `AI_SESSION_KEY` | `field-room` | Clawdbot session key |
 | `LOG_CHAT` | `true` | Log chat to files |
 
 ## API
@@ -85,8 +89,8 @@ See [../docs/API.md](../docs/API.md) for the WebSocket protocol.
 // Chat
 { type: 'chat', text: 'Hello everyone' }
 
-// Invoke Clawdbot
-{ type: 'invoke', command: '@trillian research this location' }
+// Chat with AI mention (detected automatically)
+{ type: 'chat', text: '@pauline research this location' }
 
 // Move location
 { type: 'move', location: { lat: 52.48, lon: -1.89, name: 'Birmingham' } }
@@ -110,8 +114,8 @@ See [../docs/API.md](../docs/API.md) for the WebSocket protocol.
 // New chat
 { type: 'chat', from: 'sarah', text: 'Hello', timestamp: 1738222800 }
 
-// Clawdbot response
-{ type: 'clawdbot', from: 'trillian', text: 'Found 3 results...', timestamp: 1738222805 }
+// AI response
+{ type: 'ai_response', from: 'pauline', text: 'Found 3 results...', timestamp: 1738222805 }
 
 // Presence update
 { type: 'presence', users: [{ userId: 'rob', location: {...}, status: 'online' }] }

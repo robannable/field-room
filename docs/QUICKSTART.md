@@ -5,24 +5,24 @@ Get Field Room running in 5 minutes.
 ## Prerequisites
 
 - **Node.js 18+** — `node --version`
-- **Clawdbot** — `npm install -g clawdbot`
+- **OpenClaw** — `npm install -g openclaw`
 
-## Step 1: Start Clawdbot Gateway
+## Step 1: Start OpenClaw Gateway
 
 If not already running:
 
 ```bash
-clawdbot gateway start
+openclaw gateway start
 ```
 
 Check status:
 ```bash
-clawdbot gateway status
+openclaw gateway status
 ```
 
 Should see:
 ```
-✓ Gateway running on http://localhost:3737
+✓ Gateway running on http://localhost:18789
 ```
 
 ## Step 2: Clone & Install
@@ -41,10 +41,12 @@ npm start
 
 You should see:
 ```
-[Sync Service] Listening on port 3738
+[Sync Service] Listening on 0.0.0.0:3738
 [Sync Service] WebSocket: ws://localhost:3738
 [Sync Service] Workspace: ./workspace
 ```
+
+The sync service binds to `0.0.0.0` by default for LAN access.
 
 ## Step 4: Open Client
 
@@ -78,15 +80,17 @@ Open the client in a second browser window:
 Type in Window 1: `Hello Sarah`  
 See it appear in Window 2 ✓
 
-### Invoke Clawdbot
+### Invoke OpenClaw
 
 In either window, type:
 
 ```
-@trillian what's the weather like?
+@pauline what's the weather like?
 ```
 
-Clawdbot will respond in the chat ✓
+OpenClaw will respond in the chat ✓
+
+(The AI user name defaults to "pauline" but is configurable via the `AI_USER_ID` env var.)
 
 ### Change Location
 
@@ -103,36 +107,37 @@ You'll see a system message about your location change.
 
 ### "Connection failed"
 
-**Check Clawdbot Gateway is running:**
+**Check OpenClaw Gateway is running:**
 ```bash
-curl http://localhost:3737/health
+curl http://localhost:18789/health
 ```
 
 Should return JSON with `status: "ok"`.
 
 If not, start it:
 ```bash
-clawdbot gateway start
+openclaw gateway start
 ```
 
 ---
 
-### "Clawdbot not responding"
+### "OpenClaw not responding"
 
 **Check sync service config:**
 ```bash
 # In clawdbot-connector directory
-CLAWDBOT_API=http://localhost:3737 npm start
+OPENCLAW_API=http://localhost:18789 OPENCLAW_TOKEN=your-token npm start
 ```
 
-**Test Clawdbot directly:**
+**Test OpenClaw directly:**
 ```bash
-curl -X POST http://localhost:3737/api/sessions/send \
+curl -X POST http://localhost:18789/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"sessionKey": "test", "message": "hello"}'
+  -H "Authorization: Bearer your-token" \
+  -d '{"messages": [{"role": "user", "content": "hello"}]}'
 ```
 
-Should return a response from Clawdbot.
+Should return a response from OpenClaw.
 
 ---
 
@@ -206,16 +211,16 @@ input.addEventListener('change', async (e) => {
 });
 ```
 
-### Connect Clawdbot as Participant
+### Connect OpenClaw as Participant
 
-Make Clawdbot actively join the room:
+Make OpenClaw actively join the room:
 
 ```bash
 cd clawdbot-connector
 node clawdbot-client.js
 ```
 
-Now Clawdbot sees all ambient chat and can announce proactively.
+Now OpenClaw sees all ambient chat and can announce proactively.
 
 ### Build for Production
 
@@ -243,17 +248,23 @@ Now Clawdbot sees all ambient chat and can announce proactively.
 # Sync service port
 SYNC_PORT=3738
 
-# Clawdbot Gateway URL
-CLAWDBOT_API=http://localhost:3737
+# OpenClaw Gateway URL
+OPENCLAW_API=http://localhost:18789
+
+# Bearer token for Gateway authentication
+OPENCLAW_TOKEN=your-bearer-token
 
 # Workspace directory
 WORKSPACE_PATH=/path/to/workspace
 
-# AI user ID
-AI_USER_ID=trillian
+# AI user ID (default: pauline)
+AI_USER_ID=pauline
 
-# Session key for Clawdbot
-AI_SESSION_KEY=field-room
+# OpenClaw session user
+AI_SESSION_USER=field-room
+
+# Number of recent messages for context
+CONTEXT_MESSAGES=20
 
 # Chat logging
 LOG_CHAT=true
@@ -263,7 +274,7 @@ LOG_CHAT=true
 ```bash
 SYNC_PORT=3738 \
 WORKSPACE_PATH=./my-workspace \
-AI_USER_ID=my-ai \
+AI_USER_ID=pauline \
 npm start
 ```
 
@@ -282,11 +293,12 @@ npm start
 │    Sync     │
 │   Service   │
 └──────┬──────┘
-       │ HTTP
+       │ HTTP (/v1/chat/completions)
        ▼
 ┌─────────────┐
-│  Clawdbot   │
+│  OpenClaw   │
 │   Gateway   │
+│  (:18789)   │
 └──────┬──────┘
        │
        ▼

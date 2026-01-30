@@ -1,6 +1,6 @@
 # Field Room
 
-**Multi-user collaborative workspace with Clawdbot backend**
+**Multi-user collaborative workspace with OpenClaw backend**
 
 Inspired by Field Mapping and On-Together: Virtual Coworking, Field Room provides a shared space where humans and AI work together in real-time.
 
@@ -10,13 +10,13 @@ Inspired by Field Mapping and On-Together: Virtual Coworking, Field Room provide
 ┌─────────────────────────────────────────────────┐
 │           SHARED ROOM (Sync Service)            │
 │  • Human chat (peer-to-peer)                    │
-│  • AI participation (when invoked or relevant)  │
+│  • AI participation (when mentioned or relevant)│
 │  • Presence (who's here, where they are)        │
 │  • State sync (drawings, annotations, docs)     │
 └─────────────────────────────────────────────────┘
          ▲                              ▲
          │                              │
-    [Humans]                       [Clawdbot]
+    [Humans]                       [OpenClaw]
 ```
 
 **Not:** Command → AI → Response  
@@ -26,12 +26,12 @@ Inspired by Field Mapping and On-Together: Virtual Coworking, Field Room provide
 
 ### Prerequisites
 - Node.js 18+
-- Clawdbot installed: `npm install -g clawdbot`
+- OpenClaw installed: `npm install -g openclaw`
 
-### 1. Start Clawdbot Gateway
+### 1. Start OpenClaw Gateway
 
 ```bash
-clawdbot gateway start
+openclaw gateway start
 ```
 
 ### 2. Start Sync Service
@@ -56,14 +56,15 @@ open examples/field-mapping/client/index.html
 ### 1. Sync Service (`clawdbot-connector/sync-service.js`)
 - WebSocket server for real-time room
 - Manages presence, chat, state broadcasts
-- Forwards invocations to Clawdbot
+- Detects AI mentions in chat messages and forwards to OpenClaw
+- Builds conversation context from last N messages
 - **Reusable** — works with any UI
 
-### 2. Clawdbot Client (`clawdbot-connector/clawdbot-client.js`)
-- Connects Clawdbot session to the room
+### 2. OpenClaw Client (`clawdbot-connector/clawdbot-client.js`)
+- Connects OpenClaw session to the room
 - Receives ambient context
 - Responds when invoked
-- **Reusable** — drop into any Clawdbot workspace
+- **Reusable** — drop into any OpenClaw workspace
 
 **Example implementation:** `examples/field-mapping/`
 - Minimal web client showing the pattern
@@ -77,15 +78,17 @@ Rob: Hey Sarah, check out grid ref SP 06 86
 Sarah: On it, heading there now
 ```
 
-### Invoke Clawdbot
+### Invoke OpenClaw
 ```
-Rob: @trillian research planning constraints here
-Trillian: Found 3 applications within 500m...
+Rob: @pauline research planning constraints here
+Pauline: Found 3 applications within 500m...
 ```
+
+(The AI user name is configurable via `AI_USER_ID` env var — "pauline" is the default.)
 
 ### Ambient Announcements
 ```
-Trillian: New planning application filed nearby: 2026/00156/PA
+Pauline: New planning application filed nearby: 2026/00156/PA
 ```
 
 ### Presence
@@ -123,4 +126,4 @@ MIT
 Inspired by:
 - **Field Mapping** — Text-first collaborative site tool
 - **On-Together** — Virtual coworking spaces
-- **Clawdbot** — AI agent framework
+- **OpenClaw** — AI agent framework

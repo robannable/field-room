@@ -1,16 +1,16 @@
 # LAN Testing Guide
 
-**Testing Field Room with multiple Clawdbot instances on your local network.**
+**Testing Field Room with multiple OpenClaw instances on your local network.**
 
 ## Goal
 
-Two Clawdbot instances (different machines/sessions) both connect to the same Field Room and communicate with each other.
+Two OpenClaw instances (different machines/sessions) both connect to the same Field Room and communicate with each other.
 
 ---
 
 ## Setup
 
-### Machine 1: Your Main Machine (Trillian)
+### Machine 1: Your Main Machine (Pauline)
 
 **Already set up:** Field Room in `/home/robannable/clawd/field-room/`
 
@@ -20,7 +20,7 @@ cd /home/robannable/clawd/field-room/clawdbot-connector
 npm start
 ```
 
-This runs on `ws://localhost:3738` (or `ws://YOUR_LAN_IP:3738`)
+This runs on `ws://0.0.0.0:3738` (accessible at `ws://YOUR_LAN_IP:3738`). The sync service binds to all interfaces by default for LAN access.
 
 **Get your LAN IP:**
 ```bash
@@ -30,11 +30,11 @@ ip addr show | grep "inet 192.168"
 
 ---
 
-### Machine 2: Second Clawdbot Instance
+### Machine 2: Second OpenClaw Instance
 
 **Option A: Another physical machine on LAN**
 
-1. Install Clawdbot: `npm install -g clawdbot`
+1. Install OpenClaw: `npm install -g openclaw`
 2. Clone field-room: `git clone https://github.com/robannable/field-room.git`
 3. Install dependencies: `cd field-room/clawdbot-connector && npm install`
 4. Connect to Machine 1's sync service:
@@ -52,12 +52,14 @@ node clawdbot-client.js
 cd field-room/clawdbot-connector
 npm start
 
-# Terminal 2: Connect first Clawdbot
-AI_USER_ID=trillian node clawdbot-client.js
+# Terminal 2: Connect first OpenClaw
+AI_USER_ID=pauline node clawdbot-client.js
 
-# Terminal 3: Connect second Clawdbot
+# Terminal 3: Connect second OpenClaw
 AI_USER_ID=oracle node clawdbot-client.js
 ```
+
+(The AI user name is configurable via `AI_USER_ID` env var — use any name you like.)
 
 ---
 
@@ -65,21 +67,21 @@ AI_USER_ID=oracle node clawdbot-client.js
 
 ### 1. Both AIs Join the Room
 
-**Terminal 1 (Trillian):**
+**Terminal 1 (Pauline):**
 ```
-[Connected] Joined room as trillian
+[Connected] Joined room as pauline
 ```
 
 **Terminal 2 (Oracle):**
 ```
 [Connected] Joined room as oracle
-[Join] trillian (ai)
+[Join] pauline (ai)
 ```
 
 **You (via web client):**
 ```
 Join as: Rob
-[System] trillian joined
+[System] pauline joined
 [System] oracle joined
 ```
 
@@ -92,39 +94,20 @@ Join as: Rob
 [Chat] Rob: Hello both of you
 ```
 
-### 3. Invoke One AI
+### 3. Mention One AI
 
-**You:** "@trillian what's 2+2?"
+**You:** "@pauline what's 2+2?"
 
-**Trillian's terminal:**
-```
-[Invoke] Rob: @trillian what's 2+2?
-```
+The sync service detects the mention, builds context from recent messages, and forwards to OpenClaw.
 
 **Everyone (including Oracle) sees the response:**
 ```
-[AI] trillian: 2+2 equals 4
+[AI] pauline: 2+2 equals 4
 ```
 
 ### 4. AI-to-AI via Sync Service
 
-Currently AIs see each other's messages but don't respond automatically.
-
-**Future enhancement:** Add AI mention detection:
-
-```javascript
-// In clawdbot-client.js
-case 'chat':
-  if (isMentioned(msg.text)) {
-    // Respond via Clawdbot session
-    const response = await sendToClawdbot(msg.text);
-    send({
-      type: 'clawdbot',
-      text: response
-    });
-  }
-  break;
-```
+AIs see each other's messages. The sync service handles mention detection automatically — if one AI mentions another by name, the service can forward that too.
 
 ---
 
@@ -138,18 +121,11 @@ case 'chat':
    # Or: sudo firewall-cmd --add-port=3738/tcp --permanent
    ```
 
-2. **Bind to all interfaces:**
+2. **Verify binding:**
    
-   In `sync-service.js`, change:
-   ```javascript
-   const CONFIG = {
-     SYNC_PORT: process.env.SYNC_PORT || 3738,
-     SYNC_HOST: process.env.SYNC_HOST || '0.0.0.0',  // All interfaces
-   };
-   
-   server.listen(CONFIG.SYNC_PORT, CONFIG.SYNC_HOST, () => {
-     console.log(`Listening on ${CONFIG.SYNC_HOST}:${CONFIG.SYNC_PORT}`);
-   });
+   The sync service binds to `0.0.0.0` by default, so it should be accessible on all network interfaces. Verify with:
+   ```bash
+   ss -tlnp | grep 3738
    ```
 
 3. **Check connectivity:**
@@ -185,11 +161,12 @@ Just ensure your router's firewall prevents external access to port 3738.
 ┌──────────────────┐         ┌──────────────────┐
 │   Machine 1      │         │   Machine 2      │
 │                  │         │                  │
-│   Clawdbot       │         │   Clawdbot       │
-│   (Trillian)     │         │   (Oracle)       │
+│   OpenClaw       │         │   OpenClaw       │
+│   (Pauline)      │         │   (Oracle)       │
 │                  │         │                  │
 │   Sync Service   │<────────│   Client         │
 │   :3738          │   LAN   │                  │
+│   (0.0.0.0)      │         │                  │
 │                  │         │                  │
 │   Web Browser    │         │                  │
 │   (You)          │         │                  │
@@ -204,9 +181,9 @@ All connected to same sync service via WebSocket
 
 ### 1. Collaborative Research
 
-**You:** "@trillian research Field Mapping history"
+**You:** "@pauline research Field Mapping history"
 
-**Trillian:** [Researches and responds]
+**Pauline:** [Researches and responds]
 
 **You:** "@oracle can you verify those dates?"
 
@@ -214,7 +191,7 @@ All connected to same sync service via WebSocket
 
 ### 2. Distributed Tasks
 
-**You:** "@trillian handle the frontend client"
+**You:** "@pauline handle the frontend client"
 
 **You:** "@oracle set up the VPS deployment"
 
@@ -224,7 +201,7 @@ Both work in parallel, report back to the room.
 
 **You:** "What's the best database for this?"
 
-**Trillian:** "File-based is simpler..."
+**Pauline:** "File-based is simpler..."
 
 **Oracle:** "PostgreSQL would scale better..."
 
