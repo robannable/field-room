@@ -509,16 +509,68 @@ body {
   pointer-events: none;
 }
 
-/* === SELECTION MARKER === */
+/* === PLAYER MARKERS === */
 
-.selection-marker {
-  background: none;
-  border: none;
+.player-marker,
+.other-player-marker {
+  background: none !important;
+  border: none !important;
 }
 
-.selection-pin {
-  font-size: 24px;
-  filter: drop-shadow(0 2px 2px rgba(0,0,0,0.3));
+.player-dot {
+  width: 14px;
+  height: 14px;
+  background: var(--accent);
+  border: 3px solid white;
+  border-radius: 50%;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.player-label {
+  position: absolute;
+  top: -22px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--accent);
+  color: white;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+
+.other-player-dot {
+  width: 12px;
+  height: 12px;
+  background: var(--success);
+  border: 2px solid white;
+  border-radius: 50%;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.other-player-label {
+  position: absolute;
+  top: -20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--success);
+  color: white;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 5px;
+  border-radius: 3px;
+  white-space: nowrap;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
 }
 
 /* === LOCATION-AWARE COMMANDS === */

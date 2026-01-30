@@ -201,13 +201,8 @@ function initMap() {
         (position) => {
           const { latitude, longitude } = position.coords;
           map.setView([latitude, longitude], 15);
-          // Auto-select current position
-          selectLocation(latitude, longitude);
-          // Notify room
-          send({
-            type: 'move',
-            location: { lat: latitude, lng: longitude, name: 'Current location' }
-          });
+          // Place yourself here and broadcast
+          selectLocation(latitude, longitude, true);
         },
         (error) => console.warn('Geolocation error:', error)
       );
@@ -218,33 +213,35 @@ function initMap() {
 }
 
 /**
- * Handle map click — select a location and show region of interest
+ * Handle map click — move to this location
  */
 function handleMapClick(e) {
-  selectLocation(e.latlng.lat, e.latlng.lng);
+  selectLocation(e.latlng.lat, e.latlng.lng, true);
 }
 
 /**
- * Select a location on the map with marker and ROI circle
+ * Select a location on the map — this is "you are here"
+ * @param {boolean} broadcast - Whether to notify the room of your move
  */
-function selectLocation(lat, lng) {
+function selectLocation(lat, lng, broadcast = false) {
   selectedLocation = { lat, lng, name: null, address: null };
 
-  // Update or create marker
+  // Update or create your marker
   if (selectionMarker) {
     selectionMarker.setLatLng([lat, lng]);
   } else {
     selectionMarker = L.marker([lat, lng], {
       icon: L.divIcon({
-        className: 'selection-marker',
-        html: '<div class="selection-pin">📍</div>',
-        iconSize: [28, 28],
-        iconAnchor: [14, 28]
-      })
+        className: 'player-marker',
+        html: `<div class="player-dot"></div><div class="player-label">${escapeHtml(currentUserId || 'You')}</div>`,
+        iconSize: [20, 20],
+        iconAnchor: [10, 10]
+      }),
+      zIndexOffset: 1000
     }).addTo(map);
   }
 
-  // Update or create ROI circle
+  // Update or create awareness radius
   if (selectionCircle) {
     selectionCircle.setLatLng([lat, lng]);
   } else {
@@ -252,7 +249,7 @@ function selectLocation(lat, lng) {
       radius: ROI_RADIUS,
       color: '#3b82f6',
       fillColor: '#3b82f6',
-      fillOpacity: 0.1,
+      fillOpacity: 0.08,
       weight: 2,
       dashArray: '6, 6'
     }).addTo(map);
@@ -261,15 +258,16 @@ function selectLocation(lat, lng) {
   // Update display immediately with coords
   updateLocationDisplay(`${lat.toFixed(5)}, ${lng.toFixed(5)}`, 'Looking up location...');
 
-  // Reverse geocode (debounced)
+  // Reverse geocode (debounced) — then broadcast with resolved name
   clearTimeout(reverseGeocodeTimeout);
-  reverseGeocodeTimeout = setTimeout(() => reverseGeocode(lat, lng), 300);
+  reverseGeocodeTimeout = setTimeout(() => reverseGeocode(lat, lng, broadcast), 300);
 }
 
 /**
  * Reverse geocode coordinates to a place name via Nominatim
+ * @param {boolean} broadcastMove - Whether to notify the room after resolving
  */
-async function reverseGeocode(lat, lng) {
+async function reverseGeocode(lat, lng, broadcastMove = false) {
   try {
     const url = `https://nominatim.openstreetmap.org/reverse?` + new URLSearchParams({
       lat: lat.toFixed(6),
@@ -289,7 +287,6 @@ async function reverseGeocode(lat, lng) {
 
     if (result && result.address) {
       const addr = result.address;
-      // Build a useful place name from address components
       const name = buildPlaceName(addr);
       const fullAddress = result.display_name;
 
@@ -302,6 +299,14 @@ async function reverseGeocode(lat, lng) {
       if (selectionMarker) {
         selectionMarker.bindPopup(`<strong>${escapeHtml(name)}</strong><br><small>${escapeHtml(fullAddress)}</small>`);
       }
+
+      // Broadcast move to the room with the resolved place name
+      if (broadcastMove) {
+        send({
+          type: 'move',
+          location: { lat, lng, name }
+        });
+      }
     }
   } catch (err) {
     console.warn('Reverse geocoding failed:', err);
@@ -309,6 +314,13 @@ async function reverseGeocode(lat, lng) {
       `${lat.toFixed(5)}, ${lng.toFixed(5)}`,
       'Could not resolve place name'
     );
+    // Broadcast with coords even if geocoding failed
+    if (broadcastMove) {
+      send({
+        type: 'move',
+        location: { lat, lng, name: `${lat.toFixed(4)}, ${lng.toFixed(4)}` }
+      });
+    }
   }
 }
 
@@ -425,26 +437,43 @@ function showLocationInfo() {
 
 // === HANDLE USER MOVEMENT ===
 
-const userMarkers = new Map();
+const userMarkers = new Map(); // userId -> { marker, circle }
 
 function handleUserMove(msg) {
   if (!map || !msg.location) return;
   const { lat, lng } = msg.location;
+  const locName = msg.location.name || `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
 
-  addSystemMessage(`${msg.userId} moved to ${msg.location.name || `${lat.toFixed(4)}, ${lng.toFixed(4)}`}`);
+  // Don't show our own moves (we already have our marker)
+  if (msg.userId === currentUserId) return;
 
-  // Update or create marker for this user
+  addSystemMessage(`${msg.userId} moved to ${locName}`);
+
   if (userMarkers.has(msg.userId)) {
-    userMarkers.get(msg.userId).setLatLng([lat, lng]);
+    const existing = userMarkers.get(msg.userId);
+    existing.marker.setLatLng([lat, lng]);
+    existing.circle.setLatLng([lat, lng]);
   } else {
-    const marker = L.circleMarker([lat, lng], {
-      radius: 6,
+    const marker = L.marker([lat, lng], {
+      icon: L.divIcon({
+        className: 'other-player-marker',
+        html: `<div class="other-player-dot"></div><div class="other-player-label">${escapeHtml(msg.userId)}</div>`,
+        iconSize: [20, 20],
+        iconAnchor: [10, 10]
+      }),
+      zIndexOffset: 500
+    }).addTo(map);
+
+    const circle = L.circle([lat, lng], {
+      radius: ROI_RADIUS,
       color: '#22c55e',
       fillColor: '#22c55e',
-      fillOpacity: 0.8,
-      weight: 2
-    }).addTo(map).bindTooltip(msg.userId, { permanent: false, direction: 'top' });
-    userMarkers.set(msg.userId, marker);
+      fillOpacity: 0.05,
+      weight: 1,
+      dashArray: '4, 4'
+    }).addTo(map);
+
+    userMarkers.set(msg.userId, { marker, circle });
   }
 }
 
@@ -598,7 +627,7 @@ function showHelpTab() {
       <div style="color: var(--text-secondary); font-size: 13px; line-height: 1.6;">
         <p style="margin-bottom: 12px;"><strong>Welcome to Field Room</strong> — a collaborative workspace with AI assistance.</p>
 
-        <p style="margin-bottom: 8px;"><strong>Map:</strong> Click anywhere to select a location. A region of interest (${ROI_RADIUS}m radius) will be shown. Commands will use this location automatically.</p>
+        <p style="margin-bottom: 8px;"><strong>Map:</strong> Click anywhere to place yourself there. Your awareness radius (${ROI_RADIUS}m) is shown as a circle. Other users appear on the map too. Location-aware commands use your current position.</p>
 
         <p style="margin-bottom: 8px;"><strong>AI:</strong> Mention <code>@${AI_USER}</code> or use the command buttons:</p>
         <ul style="margin-left: 20px; margin-bottom: 12px;">
