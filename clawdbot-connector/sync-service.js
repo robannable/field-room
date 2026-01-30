@@ -366,7 +366,7 @@ async function handleDrawing(clientId, msg) {
   }, clientId);
 }
 
-// Broadcast presence
+// Broadcast presence (includes the AI as a virtual participant)
 function broadcastPresence() {
   const presence = Array.from(clients.values()).map(c => ({
     userId: c.userId,
@@ -375,6 +375,19 @@ function broadcastPresence() {
     status: c.status,
     lastSeen: c.lastSeen
   }));
+
+  // Always include the AI as present
+  const aiAlreadyConnected = presence.some(p => p.userId === CONFIG.AI_USER_ID);
+  if (!aiAlreadyConnected) {
+    presence.push({
+      userId: CONFIG.AI_USER_ID,
+      userType: 'ai',
+      location: null,
+      status: 'online',
+      lastSeen: Date.now()
+    });
+  }
+
   broadcast({ type: 'presence', users: presence });
 }
 
