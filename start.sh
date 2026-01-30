@@ -4,14 +4,21 @@
 echo "🌍 Field Room - Starting..."
 echo ""
 
-# Check if Clawdbot Gateway is running
-echo "Checking Clawdbot Gateway..."
-if ! curl -s http://localhost:3737/health > /dev/null 2>&1; then
-  echo "⚠️  Clawdbot Gateway not running"
-  echo "Starting Clawdbot Gateway..."
-  clawdbot gateway start
-  sleep 2
+# Configuration
+OPENCLAW_API=${OPENCLAW_API:-"http://127.0.0.1:18789"}
+OPENCLAW_TOKEN=${OPENCLAW_TOKEN:-""}
+AI_USER_ID=${AI_USER_ID:-"pauline"}
+SYNC_PORT=${SYNC_PORT:-3738}
+CLIENT_PORT=${CLIENT_PORT:-8000}
+
+# Check if OpenClaw Gateway is running
+echo "Checking OpenClaw Gateway..."
+if ! curl -s "$OPENCLAW_API/health" > /dev/null 2>&1; then
+  echo "⚠️  OpenClaw Gateway not running at $OPENCLAW_API"
+  echo "Start it with: openclaw gateway start"
+  exit 1
 fi
+echo "✅ Gateway is running"
 
 # Check if node_modules exists
 if [ ! -d "clawdbot-connector/node_modules" ]; then
@@ -24,26 +31,35 @@ fi
 # Start sync service
 echo "🚀 Starting Sync Service..."
 cd clawdbot-connector
+OPENCLAW_API="$OPENCLAW_API" \
+OPENCLAW_TOKEN="$OPENCLAW_TOKEN" \
+AI_USER_ID="$AI_USER_ID" \
+SYNC_PORT="$SYNC_PORT" \
 npm start &
 SYNC_PID=$!
+cd ..
 
-# Wait for sync service to start
 sleep 2
+
+# Start static file server for web client
+echo "🌐 Starting web client server..."
+cd examples/field-mapping/client
+python3 -m http.server "$CLIENT_PORT" --bind 0.0.0.0 &
+CLIENT_PID=$!
+cd ../../..
+
+# Get LAN IP
+LAN_IP=$(hostname -I | awk '{print $1}')
 
 echo ""
 echo "✅ Field Room is running!"
 echo ""
-echo "📍 Sync Service:  http://localhost:3738/health"
-echo "🌐 Example Client: file://$(pwd)/../examples/field-mapping/client/index.html"
-echo ""
-echo "Or serve with Python:"
-echo "  cd examples/field-mapping/client"
-echo "  python3 -m http.server 8000"
-echo "  Open http://localhost:8000"
+echo "📍 Sync Service:  ws://${LAN_IP}:${SYNC_PORT}"
+echo "🌐 Web Client:    http://${LAN_IP}:${CLIENT_PORT}"
+echo "❤️  Health:        http://${LAN_IP}:${SYNC_PORT}/health"
+echo "🤖 AI:            ${AI_USER_ID} via ${OPENCLAW_API}"
 echo ""
 echo "Press Ctrl+C to stop"
-echo ""
 
-# Wait for interrupt
-trap "echo ''; echo 'Stopping...'; kill $SYNC_PID; exit" INT
+trap "echo ''; echo 'Stopping...'; kill $SYNC_PID $CLIENT_PID 2>/dev/null; exit" INT
 wait $SYNC_PID

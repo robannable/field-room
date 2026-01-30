@@ -257,7 +257,7 @@
       <input 
         type="text" 
         id="input" 
-        placeholder="Type a message or @trillian to invoke AI..."
+        placeholder="Type a message or @pauline to invoke AI..."
         disabled
       />
     </div>
@@ -272,6 +272,11 @@
     </div>
   </div>
 
+  <script>
+    // Auto-detect sync service URL from the page host
+    window.FIELD_ROOM_SYNC_URL = 'ws://' + window.location.hostname + ':3738';
+    window.FIELD_ROOM_AI_USER = 'pauline';
+  </script>
   <script src="client.js"></script>
 </body>
 </html>

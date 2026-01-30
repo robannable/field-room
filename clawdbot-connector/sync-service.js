@@ -3,11 +3,9 @@
  * 
  * Reusable WebSocket server that creates a shared room for:
  * - Human-to-human chat
- * - Clawdbot participation
+ * - AI participation (via OpenClaw Gateway)
  * - Presence tracking
  * - State synchronization
- * 
- * Use this as-is or fork for your own multi-user Clawdbot project.
  */
 
 const WebSocket = require('ws');
@@ -18,20 +16,22 @@ const path = require('path');
 // Configuration
 const CONFIG = {
   SYNC_PORT: process.env.SYNC_PORT || 3738,
-  CLAWDBOT_API: process.env.CLAWDBOT_API || 'http://localhost:3737',
+  OPENCLAW_API: process.env.OPENCLAW_API || 'http://127.0.0.1:18789',
+  OPENCLAW_TOKEN: process.env.OPENCLAW_TOKEN || '',
   WORKSPACE_PATH: process.env.WORKSPACE_PATH || './workspace',
-  AI_USER_ID: process.env.AI_USER_ID || 'trillian',
-  AI_SESSION_KEY: process.env.AI_SESSION_KEY || 'field-room',
-  LOG_CHAT: process.env.LOG_CHAT !== 'false', // Log chat to files
+  AI_USER_ID: process.env.AI_USER_ID || 'pauline',
+  AI_SESSION_USER: process.env.AI_SESSION_USER || 'field-room',
+  LOG_CHAT: process.env.LOG_CHAT !== 'false',
+  CONTEXT_MESSAGES: parseInt(process.env.CONTEXT_MESSAGES || '10', 10),
 };
 
 console.log('[Sync Service] Starting...');
-console.log('[Config]', JSON.stringify(CONFIG, null, 2));
+console.log('[Config]', JSON.stringify({ ...CONFIG, OPENCLAW_TOKEN: CONFIG.OPENCLAW_TOKEN ? '***' : '(none)' }, null, 2));
 
 // Connected clients: Map<clientId, ClientInfo>
 const clients = new Map();
 
-// Recent chat history (for late joiners)
+// Recent chat history (for late joiners and AI context)
 const chatHistory = [];
 const MAX_HISTORY = 100;
 
@@ -56,7 +56,6 @@ const server = http.createServer(async (req, res) => {
       uptime: process.uptime()
     }));
   } else if (req.url === '/state') {
-    // Return current room state
     const state = await loadState();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(state));
@@ -103,31 +102,24 @@ async function handleMessage(clientId, ws, msg) {
     case 'auth':
       await handleAuth(clientId, ws, msg);
       break;
-
     case 'chat':
       await handleChat(clientId, msg);
       break;
-
     case 'invoke':
       await handleInvoke(clientId, msg);
       break;
-
     case 'move':
       await handleMove(clientId, msg);
       break;
-
     case 'state_update':
       await handleStateUpdate(clientId, msg);
       break;
-
     case 'drawing':
       await handleDrawing(clientId, msg);
       break;
-
     case 'ping':
       sendTo(ws, { type: 'pong', timestamp: Date.now() });
       break;
-
     default:
       console.warn('[Unknown message type]', msg.type);
   }
@@ -150,14 +142,10 @@ async function handleAuth(clientId, ws, msg) {
 
   console.log(`[Auth] ${userId} joined (${userType})`);
 
-  // Send current state
   const state = await loadState();
   sendTo(ws, { type: 'state', data: state });
-
-  // Send recent chat history
   sendTo(ws, { type: 'history', messages: chatHistory.slice(-20) });
 
-  // Broadcast join
   broadcast({
     type: 'join',
     userId,
@@ -181,32 +169,36 @@ async function handleChat(clientId, msg) {
     timestamp: Date.now()
   };
 
-  // Store in history
   chatHistory.push(chatMsg);
-  if (chatHistory.length > MAX_HISTORY) {
-    chatHistory.shift();
-  }
+  if (chatHistory.length > MAX_HISTORY) chatHistory.shift();
 
-  // Log to file
-  if (CONFIG.LOG_CHAT) {
-    await logChat(chatMsg);
-  }
+  if (CONFIG.LOG_CHAT) await logChat(chatMsg);
 
-  // Broadcast to all
+  // Broadcast to all (including sender for confirmation)
   broadcast(chatMsg);
 
-  // Forward to Clawdbot as ambient context
-  await sendAmbientToClawdbot(chatMsg);
+  // Check if the AI is mentioned — if so, treat as an invocation
+  if (isMentioned(msg.text)) {
+    console.log(`[Mention] ${client.userId} mentioned ${CONFIG.AI_USER_ID}`);
+    await processAIRequest(client.userId, msg.text, chatMsg.id);
+  }
 }
 
-// Invoke: Direct request to Clawdbot
+// Invoke: Direct request to AI
 async function handleInvoke(clientId, msg) {
   const client = clients.get(clientId);
   if (!client) return;
 
   console.log(`[Invoke] ${client.userId}: ${msg.command}`);
+  await processAIRequest(client.userId, msg.command, msg.id);
+}
 
-  // Broadcast "typing" indicator
+/**
+ * Process an AI request by sending it to OpenClaw Gateway's
+ * chat completions endpoint with recent conversation context.
+ */
+async function processAIRequest(fromUser, text, replyToId) {
+  // Broadcast typing indicator
   broadcast({
     type: 'typing',
     userId: CONFIG.AI_USER_ID,
@@ -214,33 +206,109 @@ async function handleInvoke(clientId, msg) {
   });
 
   try {
-    // Send to Clawdbot
-    const response = await sendToClawdbot(msg.command);
+    // Build context from recent chat history
+    const contextMessages = buildContext(text, fromUser);
+    const response = await callOpenClaw(contextMessages);
 
-    // Broadcast response
     const responseMsg = {
-      type: 'clawdbot',
+      type: 'ai_response',
       id: generateId(),
       from: CONFIG.AI_USER_ID,
       text: response,
-      inReplyTo: msg.id || null,
+      inReplyTo: replyToId || null,
       timestamp: Date.now()
     };
 
     chatHistory.push(responseMsg);
+    if (chatHistory.length > MAX_HISTORY) chatHistory.shift();
+
     broadcast(responseMsg);
 
-    if (CONFIG.LOG_CHAT) {
-      await logChat(responseMsg);
-    }
+    if (CONFIG.LOG_CHAT) await logChat(responseMsg);
   } catch (err) {
-    console.error('[Invoke Error]', err);
+    console.error('[AI Error]', err);
     broadcast({
       type: 'error',
-      text: `Failed to invoke Clawdbot: ${err.message}`,
+      text: `Failed to get AI response: ${err.message}`,
       timestamp: Date.now()
     });
   }
+}
+
+/**
+ * Build OpenAI-compatible messages array from recent chat history.
+ */
+function buildContext(currentText, fromUser) {
+  const messages = [];
+
+  // System message: set the AI's identity and context
+  messages.push({
+    role: 'system',
+    content: `You are ${CONFIG.AI_USER_ID}, an AI participant in a collaborative Field Room. ` +
+      `Multiple humans and AIs share this space in real-time. ` +
+      `You can see recent conversation context. Respond naturally as a helpful, knowledgeable participant. ` +
+      `Keep responses concise unless detail is needed. ` +
+      `The person addressing you is "${fromUser}".`
+  });
+
+  // Add recent chat as context
+  const recent = chatHistory.slice(-CONFIG.CONTEXT_MESSAGES);
+  for (const msg of recent) {
+    if (msg.from === CONFIG.AI_USER_ID) {
+      messages.push({ role: 'assistant', content: msg.text });
+    } else {
+      messages.push({ role: 'user', content: `${msg.from}: ${msg.text}` });
+    }
+  }
+
+  // Add the current message (may already be in history, but ensure it's last)
+  const lastMsg = messages[messages.length - 1];
+  const currentContent = `${fromUser}: ${currentText}`;
+  if (!lastMsg || lastMsg.content !== currentContent) {
+    messages.push({ role: 'user', content: currentContent });
+  }
+
+  return messages;
+}
+
+/**
+ * Call OpenClaw Gateway's chat completions API.
+ */
+async function callOpenClaw(messages) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (CONFIG.OPENCLAW_TOKEN) {
+    headers['Authorization'] = `Bearer ${CONFIG.OPENCLAW_TOKEN}`;
+  }
+
+  const response = await fetch(`${CONFIG.OPENCLAW_API}/v1/chat/completions`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      model: 'openclaw:main',
+      user: CONFIG.AI_SESSION_USER,
+      messages
+    })
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`OpenClaw API error ${response.status}: ${body}`);
+  }
+
+  const result = await response.json();
+  const choice = result.choices?.[0];
+  return choice?.message?.content || 'No response';
+}
+
+/**
+ * Check if the AI is mentioned in a message.
+ */
+function isMentioned(text) {
+  const patterns = [
+    new RegExp(`@${CONFIG.AI_USER_ID}\\b`, 'i'),
+    new RegExp(`\\b${CONFIG.AI_USER_ID}\\b`, 'i'),
+  ];
+  return patterns.some(p => p.test(text));
 }
 
 // Move: Update user location
@@ -251,7 +319,6 @@ async function handleMove(clientId, msg) {
   client.location = msg.location;
   client.lastSeen = Date.now();
 
-  // Broadcast location update
   broadcast({
     type: 'move',
     userId: client.userId,
@@ -262,7 +329,7 @@ async function handleMove(clientId, msg) {
   broadcastPresence();
 }
 
-// State update: Shared workspace state change
+// State update
 async function handleStateUpdate(clientId, msg) {
   const state = await loadState();
   Object.assign(state, msg.update);
@@ -275,7 +342,7 @@ async function handleStateUpdate(clientId, msg) {
   }, clientId);
 }
 
-// Drawing: Persist and broadcast drawing
+// Drawing
 async function handleDrawing(clientId, msg) {
   const client = clients.get(clientId);
   if (!client) return;
@@ -297,7 +364,7 @@ async function handleDrawing(clientId, msg) {
   }, clientId);
 }
 
-// Broadcast presence to all clients
+// Broadcast presence
 function broadcastPresence() {
   const presence = Array.from(clients.values()).map(c => ({
     userId: c.userId,
@@ -306,11 +373,10 @@ function broadcastPresence() {
     status: c.status,
     lastSeen: c.lastSeen
   }));
-
   broadcast({ type: 'presence', users: presence });
 }
 
-// Send message to all clients except sender
+// Broadcast to all clients (optionally excluding one)
 function broadcast(message, excludeClientId = null) {
   const payload = JSON.stringify(message);
   clients.forEach((client, id) => {
@@ -320,40 +386,9 @@ function broadcast(message, excludeClientId = null) {
   });
 }
 
-// Send message to specific WebSocket
 function sendTo(ws, message) {
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(message));
-  }
-}
-
-// Send message to Clawdbot session
-async function sendToClawdbot(message) {
-  const response = await fetch(`${CONFIG.CLAWDBOT_API}/api/sessions/send`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      sessionKey: CONFIG.AI_SESSION_KEY,
-      message
-    })
-  });
-
-  if (!response.ok) {
-    throw new Error(`Clawdbot API error: ${response.status}`);
-  }
-
-  const result = await response.json();
-  return result.response || result.message || 'No response';
-}
-
-// Send ambient chat context to Clawdbot (non-blocking)
-async function sendAmbientToClawdbot(chatMsg) {
-  try {
-    // Optional: forward all chat as ambient context
-    // Uncomment if you want Clawdbot to see all conversation
-    // await sendToClawdbot(`[Ambient] ${chatMsg.from}: ${chatMsg.text}`);
-  } catch (err) {
-    console.error('[Ambient forward error]', err.message);
   }
 }
 
@@ -366,23 +401,17 @@ async function ensureWorkspace() {
 
 async function loadState() {
   try {
-    const stateFile = path.join(CONFIG.WORKSPACE_PATH, 'state.json');
-    const data = await fs.readFile(stateFile, 'utf8');
+    const data = await fs.readFile(path.join(CONFIG.WORKSPACE_PATH, 'state.json'), 'utf8');
     return JSON.parse(data);
-  } catch (err) {
-    return { drawings: [], annotations: [], users: [] };
-  }
+  } catch { return { drawings: [], annotations: [], users: [] }; }
 }
 
 async function saveState(state) {
-  const stateFile = path.join(CONFIG.WORKSPACE_PATH, 'state.json');
-  await fs.writeFile(stateFile, JSON.stringify(state, null, 2));
+  await fs.writeFile(path.join(CONFIG.WORKSPACE_PATH, 'state.json'), JSON.stringify(state, null, 2));
 }
 
 async function saveDrawing(drawing) {
-  const drawingsDir = path.join(CONFIG.WORKSPACE_PATH, 'drawings');
-  const filename = `${drawing.id}.geojson`;
-  const filepath = path.join(drawingsDir, filename);
+  const filepath = path.join(CONFIG.WORKSPACE_PATH, 'drawings', `${drawing.id}.geojson`);
   await fs.writeFile(filepath, JSON.stringify(drawing, null, 2));
 }
 
@@ -392,21 +421,19 @@ async function logChat(msg) {
   await fs.appendFile(logFile, JSON.stringify(msg) + '\n');
 }
 
-// Utility
 function generateId() {
   return Math.random().toString(36).substring(2, 15) +
-         Math.random().toString(36).substring(2, 15);
+    Math.random().toString(36).substring(2, 15);
 }
 
 // Startup
 async function start() {
   await ensureWorkspace();
-
-  server.listen(CONFIG.SYNC_PORT, () => {
+  server.listen(CONFIG.SYNC_PORT, '0.0.0.0', () => {
     console.log(`[Sync Service] Listening on port ${CONFIG.SYNC_PORT}`);
-    console.log(`[Sync Service] WebSocket: ws://localhost:${CONFIG.SYNC_PORT}`);
+    console.log(`[Sync Service] WebSocket: ws://0.0.0.0:${CONFIG.SYNC_PORT}`);
     console.log(`[Sync Service] Health: http://localhost:${CONFIG.SYNC_PORT}/health`);
-    console.log(`[Sync Service] Workspace: ${CONFIG.WORKSPACE_PATH}`);
+    console.log(`[Sync Service] AI: ${CONFIG.AI_USER_ID} via ${CONFIG.OPENCLAW_API}`);
   });
 }
 

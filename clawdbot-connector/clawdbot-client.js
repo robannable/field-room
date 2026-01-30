@@ -1,30 +1,30 @@
 /**
- * Clawdbot Room Client
+ * OpenClaw Room Client
  * 
- * Connects a Clawdbot session to a Field Room as an AI participant.
+ * Connects an OpenClaw instance to a Field Room as an AI participant.
+ * This client monitors the room and can send messages back.
+ * 
+ * The sync service handles AI invocations via the Gateway API,
+ * so this client is primarily for presence and ambient awareness.
  * 
  * Usage:
- *   node clawdbot-client.js
- * 
- * Or from a Clawdbot skill:
- *   exec('node /path/to/clawdbot-client.js', { background: true })
+ *   SYNC_URL=ws://localhost:3738 AI_USER_ID=pauline node clawdbot-client.js
  */
 
 const WebSocket = require('ws');
 
-// Configuration
 const CONFIG = {
   SYNC_URL: process.env.SYNC_URL || 'ws://localhost:3738',
-  AI_USER_ID: process.env.AI_USER_ID || 'trillian',
+  AI_USER_ID: process.env.AI_USER_ID || 'pauline',
   SESSION_KEY: process.env.SESSION_KEY || 'field-room',
-  AUTO_RESPOND: process.env.AUTO_RESPOND === 'true', // Auto-respond to mentions
+  AUTO_RESPOND: process.env.AUTO_RESPOND === 'true',
 };
 
 let ws = null;
 let reconnectTimer = null;
 const RECONNECT_DELAY = 5000;
 
-console.log('[Clawdbot Client] Starting...');
+console.log('[OpenClaw Client] Starting...');
 console.log('[Config]', JSON.stringify(CONFIG, null, 2));
 
 function connect() {
@@ -32,15 +32,13 @@ function connect() {
 
   ws.on('open', () => {
     console.log('[Connected] Joined room as', CONFIG.AI_USER_ID);
-    
-    // Authenticate
     send({
       type: 'auth',
       userId: CONFIG.AI_USER_ID,
       userType: 'ai',
       metadata: {
         sessionKey: CONFIG.SESSION_KEY,
-        capabilities: ['research', 'analysis', 'spatial']
+        capabilities: ['research', 'analysis', 'coding', 'conversation']
       }
     });
   });
@@ -69,61 +67,30 @@ function handleMessage(msg) {
     case 'state':
       console.log('[State] Received workspace state');
       break;
-
     case 'history':
       console.log('[History]', msg.messages.length, 'recent messages');
       break;
-
     case 'chat':
-      // Ambient chat - log but don't respond automatically
       console.log(`[Chat] ${msg.from}: ${msg.text}`);
-      
-      // Check if mentioned
-      if (isMentioned(msg.text)) {
-        console.log('[Mentioned] Auto-respond:', CONFIG.AUTO_RESPOND);
-        // The sync service will handle forwarding invocations
-      }
       break;
-
-    case 'invoke':
-      // Direct invocation - sync service handles this
-      console.log(`[Invoke] ${msg.from}: ${msg.command}`);
+    case 'ai_response':
+      console.log(`[AI] ${msg.from}: ${msg.text}`);
       break;
-
-    case 'clawdbot':
-      // Response from another Clawdbot or echo of our own
-      if (msg.from !== CONFIG.AI_USER_ID) {
-        console.log(`[AI] ${msg.from}: ${msg.text}`);
-      }
-      break;
-
     case 'presence':
-      console.log('[Presence]', msg.users.length, 'users online');
+      console.log('[Presence]', msg.users.map(u => u.userId).join(', '));
       break;
-
     case 'join':
       console.log(`[Join] ${msg.userId} (${msg.userType})`);
       break;
-
     case 'move':
       console.log(`[Move] ${msg.userId} →`, msg.location?.name || 'unknown');
       break;
-
     case 'drawing':
       console.log('[Drawing]', msg.drawing.id, msg.drawing.type);
       break;
-
     default:
       console.log('[Unknown]', msg.type);
   }
-}
-
-function isMentioned(text) {
-  const patterns = [
-    new RegExp(`@${CONFIG.AI_USER_ID}\\b`, 'i'),
-    new RegExp(`\\b${CONFIG.AI_USER_ID}\\b`, 'i'),
-  ];
-  return patterns.some(p => p.test(text));
 }
 
 function send(message) {
@@ -132,7 +99,9 @@ function send(message) {
   }
 }
 
-// Graceful shutdown
+// Export send for programmatic use
+module.exports = { send, connect };
+
 process.on('SIGINT', () => {
   console.log('[Shutdown] Disconnecting...');
   if (reconnectTimer) clearTimeout(reconnectTimer);
@@ -140,5 +109,7 @@ process.on('SIGINT', () => {
   process.exit(0);
 });
 
-// Start
-connect();
+// Start if run directly
+if (require.main === module) {
+  connect();
+}
