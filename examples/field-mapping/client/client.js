@@ -18,6 +18,10 @@ let selectionCircle = null;     // Region of interest circle
 const ROI_RADIUS = 250;         // Default region of interest radius in metres
 let reverseGeocodeTimeout = null;
 
+// Notes and meetings
+const noteMarkers = new Map();  // noteId -> L.marker
+const meetingMarkers = new Map(); // meetingId -> L.marker
+
 // DOM elements
 const authOverlay = document.getElementById('auth-overlay');
 const usernameInput = document.getElementById('username');
@@ -142,6 +146,32 @@ function handleMessage(msg) {
     case 'drawing':
       addSystemMessage(`${msg.drawing.createdBy} added a drawing`);
       break;
+    case 'notes':
+      // Initial notes load
+      msg.notes.forEach(n => addNoteMarker(n));
+      break;
+    case 'note_added':
+      addNoteMarker(msg.note);
+      addSystemMessage(`📌 ${msg.note.author} left a note at ${msg.note.locationName || 'a location'}`);
+      break;
+    case 'note_deleted':
+      removeNoteMarker(msg.noteId);
+      break;
+    case 'meetings':
+      msg.meetings.forEach(m => addMeetingMarker(m));
+      break;
+    case 'meeting_started':
+      addMeetingMarker(msg.meeting);
+      addSystemMessage(`📋 ${msg.meeting.startedBy} started a meeting at ${msg.meeting.locationName}`);
+      break;
+    case 'meeting_joined':
+      addSystemMessage(`📋 ${msg.userId} joined the meeting`);
+      break;
+    case 'meeting_ended':
+      removeMeetingMarker(msg.meetingId);
+      addNoteMarker(msg.note);
+      addSystemMessage(`📋 Meeting ended at ${msg.locationName}. Transcript saved: ${msg.fileName}`);
+      break;
     case 'typing':
       showTyping(msg.userId);
       break;
@@ -164,6 +194,10 @@ function sendMessage(text) {
   if (text === '/help') { showHelpTab(); return; }
   if (text === '/where') { showLocationInfo(); return; }
   if (text.startsWith('/goto ')) { searchAndGoto(text.slice(6).trim()); return; }
+  if (text.startsWith('/note ')) { leaveNote(text.slice(6).trim()); return; }
+  if (text === '/meeting') { startMeeting(); return; }
+  if (text.startsWith('/join ')) { joinMeeting(text.slice(6).trim()); return; }
+  if (text.startsWith('/end ')) { endMeeting(text.slice(5).trim()); return; }
 
   // Check if invoking AI
   if (text.startsWith('@' + AI_USER) || text.startsWith('/' + AI_USER)) {
@@ -636,6 +670,14 @@ function showHelpTab() {
           <li>@${AI_USER} what's nearby? — points of interest</li>
         </ul>
 
+        <p style="margin-bottom: 8px;"><strong>Notes &amp; Meetings:</strong></p>
+        <ul style="margin-left: 20px; margin-bottom: 12px;">
+          <li><code>/note &lt;text&gt;</code> — Leave a note pinned to your location</li>
+          <li><code>/meeting</code> — Start a meeting at your location (chat gets transcribed)</li>
+          <li><code>/join &lt;id&gt;</code> — Join an active meeting</li>
+          <li><code>/end &lt;id&gt;</code> — End a meeting (saves transcript as a file)</li>
+        </ul>
+
         <p style="margin-bottom: 8px;"><strong>Commands:</strong></p>
         <ul style="margin-left: 20px;">
           <li><code>/goto &lt;place&gt;</code> — Search and jump to a location</li>
@@ -646,6 +688,121 @@ function showHelpTab() {
       </div>
     </div>
   `;
+}
+
+// === NOTES ===
+
+function leaveNote(text) {
+  if (!selectedLocation) {
+    addSystemMessage('📌 Click on the map to place yourself first, then leave a note.', true);
+    return;
+  }
+  if (!text) {
+    addSystemMessage('Usage: /note <your note text>', true);
+    return;
+  }
+
+  send({
+    type: 'note',
+    action: 'add',
+    lat: selectedLocation.lat,
+    lng: selectedLocation.lng,
+    locationName: selectedLocation.name || selectedLocation.address,
+    text
+  });
+}
+
+function addNoteMarker(note) {
+  if (!map || noteMarkers.has(note.id)) return;
+
+  const marker = L.marker([note.lat, note.lng], {
+    icon: L.divIcon({
+      className: 'note-marker',
+      html: note.meetingFile ? '<div class="note-icon">📋</div>' : '<div class="note-icon">📌</div>',
+      iconSize: [24, 24],
+      iconAnchor: [12, 12]
+    }),
+    zIndexOffset: 200
+  }).addTo(map);
+
+  const time = new Date(note.timestamp).toLocaleString();
+  marker.bindPopup(
+    `<div class="note-popup">` +
+    `<strong>${escapeHtml(note.author)}</strong> <small>${time}</small>` +
+    `<p>${escapeHtml(note.text)}</p>` +
+    (note.locationName ? `<small>📍 ${escapeHtml(note.locationName)}</small>` : '') +
+    `</div>`
+  );
+
+  noteMarkers.set(note.id, marker);
+}
+
+function removeNoteMarker(noteId) {
+  const marker = noteMarkers.get(noteId);
+  if (marker && map) {
+    map.removeLayer(marker);
+    noteMarkers.delete(noteId);
+  }
+}
+
+// === MEETINGS ===
+
+function startMeeting() {
+  if (!selectedLocation) {
+    addSystemMessage('📋 Click on the map to place yourself first, then start a meeting.', true);
+    return;
+  }
+
+  send({
+    type: 'meeting',
+    action: 'start',
+    lat: selectedLocation.lat,
+    lng: selectedLocation.lng,
+    locationName: selectedLocation.name || selectedLocation.address
+  });
+}
+
+function joinMeeting(meetingId) {
+  send({ type: 'meeting', action: 'join', meetingId });
+}
+
+function endMeeting(meetingId) {
+  send({ type: 'meeting', action: 'end', meetingId });
+}
+
+function addMeetingMarker(meeting) {
+  if (!map || meetingMarkers.has(meeting.id)) return;
+
+  const marker = L.marker([meeting.lat, meeting.lng], {
+    icon: L.divIcon({
+      className: 'meeting-marker',
+      html: '<div class="meeting-icon">🟢</div><div class="meeting-label">Meeting</div>',
+      iconSize: [24, 24],
+      iconAnchor: [12, 12]
+    }),
+    zIndexOffset: 300
+  }).addTo(map);
+
+  marker.bindPopup(
+    `<div class="meeting-popup">` +
+    `<strong>Active Meeting</strong>` +
+    `<p>Started by ${escapeHtml(meeting.startedBy)}</p>` +
+    `<p>Participants: ${meeting.participants.map(escapeHtml).join(', ')}</p>` +
+    `<p>📍 ${escapeHtml(meeting.locationName)}</p>` +
+    `<p><small>ID: ${meeting.id.slice(0, 8)}</small></p>` +
+    `<p><code>/join ${meeting.id.slice(0, 8)}</code> to join</p>` +
+    `</div>`
+  );
+
+  meetingMarkers.set(meeting.id, marker);
+}
+
+function removeMeetingMarker(meetingId) {
+  const marker = meetingMarkers.get(meetingId);
+  if (marker && map) {
+    map.removeLayer(marker);
+    meetingMarkers.delete(meetingId);
+  }
 }
 
 // === MAP RESIZE HANDLES ===

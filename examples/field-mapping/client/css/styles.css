@@ -587,6 +587,70 @@ body {
   color: var(--accent);
 }
 
+/* === NOTE MARKERS === */
+
+.note-marker {
+  background: none !important;
+  border: none !important;
+}
+
+.note-icon {
+  font-size: 20px;
+  filter: drop-shadow(0 1px 2px rgba(0,0,0,0.3));
+}
+
+.note-popup p {
+  margin: 6px 0;
+  line-height: 1.4;
+}
+
+.note-popup small {
+  color: var(--text-muted);
+}
+
+/* === MEETING MARKERS === */
+
+.meeting-marker {
+  background: none !important;
+  border: none !important;
+}
+
+.meeting-icon {
+  font-size: 18px;
+  animation: pulse-meeting 2s ease-in-out infinite;
+}
+
+.meeting-label {
+  position: absolute;
+  top: -18px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #16a34a;
+  color: white;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 5px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+@keyframes pulse-meeting {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.3); }
+}
+
+.meeting-popup p {
+  margin: 4px 0;
+  font-size: 13px;
+}
+
+.meeting-popup code {
+  background: var(--bg-tertiary);
+  padding: 2px 4px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+
 /* === UTILITIES === */
 
 .hidden {

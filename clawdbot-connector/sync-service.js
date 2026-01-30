@@ -5,6 +5,8 @@
  * - Human-to-human chat
  * - AI participation (via OpenClaw Gateway)
  * - Presence tracking
+ * - Notes pinned to locations
+ * - Location-based meetings with transcripts
  * - State synchronization
  */
 
@@ -35,23 +37,27 @@ const clients = new Map();
 const chatHistory = [];
 const MAX_HISTORY = 100;
 
+// Notes: persistent, location-pinned text { id, lat, lng, name, text, author, timestamp }
+let notes = [];
+
+// Active meetings: Map<meetingId, MeetingState>
+const activeMeetings = new Map();
+
 // HTTP server for health checks
 const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  if (req.method === 'OPTIONS') {
-    res.writeHead(200);
-    res.end();
-    return;
-  }
+  if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
 
   if (req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'ok',
       clients: clients.size,
+      notes: notes.length,
+      activeMeetings: activeMeetings.size,
       workspace: CONFIG.WORKSPACE_PATH,
       uptime: process.uptime()
     }));
@@ -86,6 +92,8 @@ wss.on('connection', (ws, req) => {
     const client = clients.get(clientId);
     if (client) {
       console.log(`[Disconnect] ${client.userId} (${clientId})`);
+      // Leave any meetings
+      leaveAllMeetings(client.userId);
       clients.delete(clientId);
       broadcastPresence();
     }
@@ -111,6 +119,12 @@ async function handleMessage(clientId, ws, msg) {
     case 'move':
       await handleMove(clientId, msg);
       break;
+    case 'note':
+      await handleNote(clientId, msg);
+      break;
+    case 'meeting':
+      await handleMeeting(clientId, msg);
+      break;
     case 'state_update':
       await handleStateUpdate(clientId, msg);
       break;
@@ -125,15 +139,13 @@ async function handleMessage(clientId, ws, msg) {
   }
 }
 
-// Auth: Register client
+// === AUTH ===
+
 async function handleAuth(clientId, ws, msg) {
   const { userId, userType = 'human', metadata = {} } = msg;
 
   clients.set(clientId, {
-    ws,
-    userId,
-    userType,
-    metadata,
+    ws, userId, userType, metadata,
     location: null,
     status: 'online',
     joinedAt: Date.now(),
@@ -145,18 +157,15 @@ async function handleAuth(clientId, ws, msg) {
   const state = await loadState();
   sendTo(ws, { type: 'state', data: state });
   sendTo(ws, { type: 'history', messages: chatHistory.slice(-20) });
+  sendTo(ws, { type: 'notes', notes });
+  sendTo(ws, { type: 'meetings', meetings: getActiveMeetingsSummary() });
 
-  broadcast({
-    type: 'join',
-    userId,
-    userType,
-    timestamp: Date.now()
-  }, clientId);
-
+  broadcast({ type: 'join', userId, userType, timestamp: Date.now() }, clientId);
   broadcastPresence();
 }
 
-// Chat: Human-to-human message
+// === CHAT ===
+
 async function handleChat(clientId, msg) {
   const client = clients.get(clientId);
   if (!client) return;
@@ -171,42 +180,260 @@ async function handleChat(clientId, msg) {
 
   chatHistory.push(chatMsg);
   if (chatHistory.length > MAX_HISTORY) chatHistory.shift();
-
   if (CONFIG.LOG_CHAT) await logChat(chatMsg);
 
-  // Broadcast to all (including sender for confirmation)
   broadcast(chatMsg);
 
-  // Check if the AI is mentioned — if so, treat as an invocation
+  // Record in active meetings this user is part of
+  recordMeetingChat(client.userId, msg.text);
+
+  // Check for AI mention
   if (isMentioned(msg.text)) {
     console.log(`[Mention] ${client.userId} mentioned ${CONFIG.AI_USER_ID}`);
     await processAIRequest(client.userId, msg.text, chatMsg.id);
   }
 }
 
-// Invoke: Direct request to AI
+// === INVOKE ===
+
 async function handleInvoke(clientId, msg) {
   const client = clients.get(clientId);
   if (!client) return;
-
   console.log(`[Invoke] ${client.userId}: ${msg.command}`);
   await processAIRequest(client.userId, msg.command, msg.id);
 }
 
-/**
- * Process an AI request by sending it to OpenClaw Gateway's
- * chat completions endpoint with recent conversation context.
- */
-async function processAIRequest(fromUser, text, replyToId) {
-  // Broadcast typing indicator
+// === NOTES ===
+
+async function handleNote(clientId, msg) {
+  const client = clients.get(clientId);
+  if (!client) return;
+
+  if (msg.action === 'add') {
+    const note = {
+      id: generateId(),
+      lat: msg.lat,
+      lng: msg.lng,
+      locationName: msg.locationName || null,
+      text: msg.text,
+      author: client.userId,
+      timestamp: Date.now()
+    };
+
+    notes.push(note);
+    await saveNotes();
+
+    console.log(`[Note] ${client.userId} left note at ${msg.locationName || `${msg.lat},${msg.lng}`}`);
+
+    broadcast({
+      type: 'note_added',
+      note,
+      timestamp: Date.now()
+    });
+
+  } else if (msg.action === 'delete' && msg.noteId) {
+    const idx = notes.findIndex(n => n.id === msg.noteId && n.author === client.userId);
+    if (idx !== -1) {
+      notes.splice(idx, 1);
+      await saveNotes();
+      broadcast({ type: 'note_deleted', noteId: msg.noteId, timestamp: Date.now() });
+    }
+  }
+}
+
+// === MEETINGS ===
+
+async function handleMeeting(clientId, msg) {
+  const client = clients.get(clientId);
+  if (!client) return;
+
+  switch (msg.action) {
+    case 'start':
+      return startMeeting(client, msg);
+    case 'join':
+      return joinMeeting(client, msg.meetingId);
+    case 'end':
+      return endMeeting(client, msg.meetingId);
+    default:
+      console.warn('[Meeting] Unknown action:', msg.action);
+  }
+}
+
+function startMeeting(client, msg) {
+  if (!msg.lat || !msg.lng) {
+    sendToUser(client.userId, { type: 'error', text: 'Select a location on the map before starting a meeting.' });
+    return;
+  }
+
+  const meetingId = generateId();
+  const now = new Date();
+
+  const meeting = {
+    id: meetingId,
+    lat: msg.lat,
+    lng: msg.lng,
+    locationName: msg.locationName || `${msg.lat.toFixed(4)}, ${msg.lng.toFixed(4)}`,
+    startedBy: client.userId,
+    startedAt: now.toISOString(),
+    participants: new Set([client.userId]),
+    transcript: [
+      `MEETING TRANSCRIPT`,
+      `==================`,
+      `Location: ${msg.locationName || `${msg.lat.toFixed(5)}, ${msg.lng.toFixed(5)}`}`,
+      `Date: ${now.toLocaleDateString('en-GB', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}`,
+      `Time: ${now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`,
+      `Started by: ${client.userId}`,
+      ``,
+      `--- Meeting Started ---`,
+      ``
+    ]
+  };
+
+  activeMeetings.set(meetingId, meeting);
+  console.log(`[Meeting] ${client.userId} started meeting at ${meeting.locationName}`);
+
   broadcast({
-    type: 'typing',
-    userId: CONFIG.AI_USER_ID,
+    type: 'meeting_started',
+    meeting: {
+      id: meetingId,
+      lat: msg.lat,
+      lng: msg.lng,
+      locationName: meeting.locationName,
+      startedBy: client.userId,
+      participants: [client.userId]
+    },
     timestamp: Date.now()
   });
+}
+
+function joinMeeting(client, meetingId) {
+  let meeting = activeMeetings.get(meetingId);
+  // Allow prefix matching for short IDs
+  if (!meeting) {
+    for (const [id, m] of activeMeetings) {
+      if (id.startsWith(meetingId)) { meeting = m; meetingId = id; break; }
+    }
+  }
+  if (!meeting) {
+    sendToUser(client.userId, { type: 'error', text: 'Meeting not found.' });
+    return;
+  }
+
+  if (meeting.participants.has(client.userId)) {
+    sendToUser(client.userId, { type: 'error', text: 'You are already in this meeting.' });
+    return;
+  }
+
+  meeting.participants.add(client.userId);
+  meeting.transcript.push(`[${client.userId} joined the meeting]`);
+  meeting.transcript.push(``);
+
+  console.log(`[Meeting] ${client.userId} joined meeting ${meetingId}`);
+
+  broadcast({
+    type: 'meeting_joined',
+    meetingId,
+    userId: client.userId,
+    participants: [...meeting.participants],
+    timestamp: Date.now()
+  });
+}
+
+async function endMeeting(client, meetingId) {
+  let meeting = activeMeetings.get(meetingId);
+  if (!meeting) {
+    for (const [id, m] of activeMeetings) {
+      if (id.startsWith(meetingId)) { meeting = m; meetingId = id; break; }
+    }
+  }
+  if (!meeting) {
+    sendToUser(client.userId, { type: 'error', text: 'Meeting not found.' });
+    return;
+  }
+
+  if (!meeting.participants.has(client.userId)) {
+    sendToUser(client.userId, { type: 'error', text: 'You are not in this meeting.' });
+    return;
+  }
+
+  // Finalize transcript
+  const now = new Date();
+  meeting.transcript.push(``);
+  meeting.transcript.push(`--- Meeting Ended at ${now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })} ---`);
+  meeting.transcript.push(`Participants: ${[...meeting.participants].join(', ')}`);
+
+  const transcriptText = meeting.transcript.join('\n');
+
+  // Save transcript as a file in workspace
+  const fileName = `meeting_${now.toISOString().slice(0, 10)}_${now.toISOString().slice(11, 16).replace(':', '')}.txt`;
+  const meetingsDir = path.join(CONFIG.WORKSPACE_PATH, 'meetings');
+  await fs.mkdir(meetingsDir, { recursive: true });
+  await fs.writeFile(path.join(meetingsDir, fileName), transcriptText);
+
+  // Also leave a note at the meeting location
+  const note = {
+    id: generateId(),
+    lat: meeting.lat,
+    lng: meeting.lng,
+    locationName: meeting.locationName,
+    text: `📋 Meeting transcript: ${fileName} (${[...meeting.participants].join(', ')})`,
+    author: 'system',
+    timestamp: Date.now(),
+    meetingFile: fileName
+  };
+  notes.push(note);
+  await saveNotes();
+
+  console.log(`[Meeting] Ended. Transcript saved: ${fileName}`);
+
+  activeMeetings.delete(meetingId);
+
+  broadcast({
+    type: 'meeting_ended',
+    meetingId,
+    fileName,
+    locationName: meeting.locationName,
+    endedBy: client.userId,
+    note,
+    timestamp: Date.now()
+  });
+}
+
+function recordMeetingChat(userId, text) {
+  for (const [, meeting] of activeMeetings) {
+    if (meeting.participants.has(userId)) {
+      meeting.transcript.push(`${userId}: ${text}`);
+    }
+  }
+}
+
+function leaveAllMeetings(userId) {
+  for (const [, meeting] of activeMeetings) {
+    if (meeting.participants.has(userId)) {
+      meeting.participants.delete(userId);
+      meeting.transcript.push(`[${userId} disconnected]`);
+    }
+  }
+}
+
+function getActiveMeetingsSummary() {
+  return [...activeMeetings.values()].map(m => ({
+    id: m.id,
+    lat: m.lat,
+    lng: m.lng,
+    locationName: m.locationName,
+    startedBy: m.startedBy,
+    startedAt: m.startedAt,
+    participants: [...m.participants]
+  }));
+}
+
+// === AI ===
+
+async function processAIRequest(fromUser, text, replyToId) {
+  broadcast({ type: 'typing', userId: CONFIG.AI_USER_ID, timestamp: Date.now() });
 
   try {
-    // Build context from recent chat history
     const contextMessages = buildContext(text, fromUser);
     const response = await callOpenClaw(contextMessages);
 
@@ -222,38 +449,43 @@ async function processAIRequest(fromUser, text, replyToId) {
     chatHistory.push(responseMsg);
     if (chatHistory.length > MAX_HISTORY) chatHistory.shift();
 
-    broadcast(responseMsg);
+    // Record AI responses in meetings too
+    recordMeetingChat(CONFIG.AI_USER_ID, response);
 
+    broadcast(responseMsg);
     if (CONFIG.LOG_CHAT) await logChat(responseMsg);
   } catch (err) {
     console.error('[AI Error]', err);
-    broadcast({
-      type: 'error',
-      text: `Failed to get AI response: ${err.message}`,
-      timestamp: Date.now()
-    });
+    broadcast({ type: 'error', text: `Failed to get AI response: ${err.message}`, timestamp: Date.now() });
   }
 }
 
-/**
- * Build OpenAI-compatible messages array from recent chat history.
- */
 function buildContext(currentText, fromUser) {
   const messages = [];
 
-  // System message: set the AI's identity and context
-  messages.push({
-    role: 'system',
-    content: `You are ${CONFIG.AI_USER_ID}, an AI participant in a collaborative Field Room. ` +
-      `Multiple humans and AIs share this space in real-time. ` +
-      `You can see recent conversation context. Respond naturally as a helpful, knowledgeable participant. ` +
-      `Keep responses concise unless detail is needed. ` +
-      `You have access to tools and workspace files — use them when helpful. ` +
-      `You share a workspace with your main session, so memory files and project files are available. ` +
-      `The person addressing you is "${fromUser}".`
-  });
+  // System prompt with notes context
+  let systemContent = `You are ${CONFIG.AI_USER_ID}, an AI participant in a collaborative Field Room. ` +
+    `Multiple humans and AIs share this space in real-time. ` +
+    `You can see recent conversation context. Respond naturally as a helpful, knowledgeable participant. ` +
+    `Keep responses concise unless detail is needed. ` +
+    `You have access to tools and workspace files — use them when helpful. ` +
+    `You share a workspace with your main session, so memory files and project files are available. ` +
+    `The person addressing you is "${fromUser}".`;
 
-  // Add recent chat as context
+  // Add nearby notes context if the user has a location
+  const userClient = [...clients.values()].find(c => c.userId === fromUser);
+  if (userClient?.location && notes.length > 0) {
+    const nearbyNotes = getNotesNear(userClient.location.lat, userClient.location.lng, 500);
+    if (nearbyNotes.length > 0) {
+      systemContent += `\n\nNotes left at or near the user's current location:\n`;
+      nearbyNotes.forEach(n => {
+        systemContent += `- "${n.text}" (by ${n.author} at ${n.locationName || 'unnamed location'})\n`;
+      });
+    }
+  }
+
+  messages.push({ role: 'system', content: systemContent });
+
   const recent = chatHistory.slice(-CONFIG.CONTEXT_MESSAGES);
   for (const msg of recent) {
     if (msg.from === CONFIG.AI_USER_ID) {
@@ -263,7 +495,6 @@ function buildContext(currentText, fromUser) {
     }
   }
 
-  // Add the current message (may already be in history, but ensure it's last)
   const lastMsg = messages[messages.length - 1];
   const currentContent = `${fromUser}: ${currentText}`;
   if (!lastMsg || lastMsg.content !== currentContent) {
@@ -273,9 +504,6 @@ function buildContext(currentText, fromUser) {
   return messages;
 }
 
-/**
- * Call OpenClaw Gateway's chat completions API.
- */
 async function callOpenClaw(messages) {
   const headers = { 'Content-Type': 'application/json' };
   if (CONFIG.OPENCLAW_TOKEN) {
@@ -285,11 +513,7 @@ async function callOpenClaw(messages) {
   const response = await fetch(`${CONFIG.OPENCLAW_API}/v1/chat/completions`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({
-      model: 'openclaw:main',
-      user: CONFIG.AI_SESSION_USER,
-      messages
-    })
+    body: JSON.stringify({ model: 'openclaw:main', user: CONFIG.AI_SESSION_USER, messages })
   });
 
   if (!response.ok) {
@@ -298,13 +522,9 @@ async function callOpenClaw(messages) {
   }
 
   const result = await response.json();
-  const choice = result.choices?.[0];
-  return choice?.message?.content || 'No response';
+  return result.choices?.[0]?.message?.content || 'No response';
 }
 
-/**
- * Check if the AI is mentioned in a message.
- */
 function isMentioned(text) {
   const patterns = [
     new RegExp(`@${CONFIG.AI_USER_ID}\\b`, 'i'),
@@ -313,7 +533,8 @@ function isMentioned(text) {
   return patterns.some(p => p.test(text));
 }
 
-// Move: Update user location
+// === MOVE ===
+
 async function handleMove(clientId, msg) {
   const client = clients.get(clientId);
   if (!client) return;
@@ -331,20 +552,15 @@ async function handleMove(clientId, msg) {
   broadcastPresence();
 }
 
-// State update
+// === STATE / DRAWING ===
+
 async function handleStateUpdate(clientId, msg) {
   const state = await loadState();
   Object.assign(state, msg.update);
   await saveState(state);
-
-  broadcast({
-    type: 'state_update',
-    update: msg.update,
-    timestamp: Date.now()
-  }, clientId);
+  broadcast({ type: 'state_update', update: msg.update, timestamp: Date.now() }, clientId);
 }
 
-// Drawing
 async function handleDrawing(clientId, msg) {
   const client = clients.get(clientId);
   if (!client) return;
@@ -358,15 +574,11 @@ async function handleDrawing(clientId, msg) {
   };
 
   await saveDrawing(drawing);
-
-  broadcast({
-    type: 'drawing',
-    drawing,
-    timestamp: Date.now()
-  }, clientId);
+  broadcast({ type: 'drawing', drawing, timestamp: Date.now() }, clientId);
 }
 
-// Broadcast presence (includes the AI as a virtual participant)
+// === PRESENCE ===
+
 function broadcastPresence() {
   const presence = Array.from(clients.values()).map(c => ({
     userId: c.userId,
@@ -376,7 +588,6 @@ function broadcastPresence() {
     lastSeen: c.lastSeen
   }));
 
-  // Always include the AI as present
   const aiAlreadyConnected = presence.some(p => p.userId === CONFIG.AI_USER_ID);
   if (!aiAlreadyConnected) {
     presence.push({
@@ -391,7 +602,8 @@ function broadcastPresence() {
   broadcast({ type: 'presence', users: presence });
 }
 
-// Broadcast to all clients (optionally excluding one)
+// === BROADCAST HELPERS ===
+
 function broadcast(message, excludeClientId = null) {
   const payload = JSON.stringify(message);
   clients.forEach((client, id) => {
@@ -407,11 +619,23 @@ function sendTo(ws, message) {
   }
 }
 
-// File operations
+function sendToUser(userId, message) {
+  clients.forEach((client) => {
+    if (client.userId === userId && client.ws.readyState === WebSocket.OPEN) {
+      client.ws.send(JSON.stringify(message));
+    }
+  });
+}
+
+// === FILE OPERATIONS ===
+
 async function ensureWorkspace() {
   await fs.mkdir(CONFIG.WORKSPACE_PATH, { recursive: true });
   await fs.mkdir(path.join(CONFIG.WORKSPACE_PATH, 'drawings'), { recursive: true });
   await fs.mkdir(path.join(CONFIG.WORKSPACE_PATH, 'chat-logs'), { recursive: true });
+  await fs.mkdir(path.join(CONFIG.WORKSPACE_PATH, 'meetings'), { recursive: true });
+  // Load persisted notes
+  await loadNotes();
 }
 
 async function loadState() {
@@ -428,6 +652,35 @@ async function saveState(state) {
 async function saveDrawing(drawing) {
   const filepath = path.join(CONFIG.WORKSPACE_PATH, 'drawings', `${drawing.id}.geojson`);
   await fs.writeFile(filepath, JSON.stringify(drawing, null, 2));
+}
+
+async function loadNotes() {
+  try {
+    const data = await fs.readFile(path.join(CONFIG.WORKSPACE_PATH, 'notes.json'), 'utf8');
+    notes = JSON.parse(data);
+    console.log(`[Notes] Loaded ${notes.length} notes`);
+  } catch { notes = []; }
+}
+
+async function saveNotes() {
+  await fs.writeFile(path.join(CONFIG.WORKSPACE_PATH, 'notes.json'), JSON.stringify(notes, null, 2));
+}
+
+function getNotesNear(lat, lng, radiusMetres) {
+  return notes.filter(n => {
+    const d = haversineDistance(lat, lng, n.lat, n.lng);
+    return d <= radiusMetres;
+  });
+}
+
+function haversineDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
 async function logChat(msg) {
