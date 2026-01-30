@@ -1,0 +1,27 @@
+{
+  "name": "field-room-connector",
+  "version": "0.1.0",
+  "description": "Reusable Clawdbot multi-user sync service",
+  "main": "sync-service.js",
+  "scripts": {
+    "start": "node sync-service.js",
+    "dev": "nodemon sync-service.js"
+  },
+  "keywords": [
+    "clawdbot",
+    "multi-user",
+    "websocket",
+    "collaboration"
+  ],
+  "author": "Rob Annable",
+  "license": "MIT",
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
