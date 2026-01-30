@@ -248,6 +248,8 @@ function buildContext(currentText, fromUser) {
       `Multiple humans and AIs share this space in real-time. ` +
       `You can see recent conversation context. Respond naturally as a helpful, knowledgeable participant. ` +
       `Keep responses concise unless detail is needed. ` +
+      `You have access to tools and workspace files — use them when helpful. ` +
+      `You share a workspace with your main session, so memory files and project files are available. ` +
       `The person addressing you is "${fromUser}".`
   });
 
