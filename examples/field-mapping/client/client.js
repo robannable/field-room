@@ -1,6 +1,6 @@
 /**
- * Field Room Client - Enhanced with map and auxiliary panels
- * Collaborative workspace with Clawdbot backend
+ * Field Room Client - Enhanced with map, location selection, and AI integration
+ * Collaborative workspace with OpenClaw backend
  */
 
 const SYNC_URL = window.FIELD_ROOM_SYNC_URL || 'ws://localhost:3738';
@@ -10,6 +10,13 @@ let ws = null;
 let currentUserId = null;
 let reconnectTimer = null;
 let map = null;
+
+// Location selection state
+let selectedLocation = null;    // { lat, lng, name, address }
+let selectionMarker = null;     // Leaflet marker
+let selectionCircle = null;     // Region of interest circle
+const ROI_RADIUS = 250;         // Default region of interest radius in metres
+let reverseGeocodeTimeout = null;
 
 // DOM elements
 const authOverlay = document.getElementById('auth-overlay');
@@ -23,6 +30,7 @@ const presenceListEl = document.getElementById('presence-list');
 const auxTabs = document.querySelectorAll('.aux-tab');
 const auxContent = document.getElementById('aux-panel-content');
 const commandPanel = document.getElementById('command-panel');
+const locationDisplay = document.getElementById('location-display');
 
 // === AUTH ===
 
@@ -55,14 +63,25 @@ commandForm.addEventListener('submit', (e) => {
 
 commandPanel.addEventListener('click', (e) => {
   const cmd = e.target.closest('.cmd');
-  if (cmd && cmd.dataset.suggest) {
-    let suggestion = cmd.dataset.suggest.replace('{ai}', AI_USER);
-    commandInput.value = suggestion;
-    commandInput.focus();
-    // Position cursor after mention
-    const mentionEnd = suggestion.indexOf(' ') + 1;
-    commandInput.setSelectionRange(mentionEnd, mentionEnd);
+  if (!cmd || !cmd.dataset.suggest) return;
+
+  let suggestion = cmd.dataset.suggest.replace('{ai}', AI_USER);
+
+  // Inject location context if a location is selected and the command needs it
+  if (cmd.dataset.location !== 'false' && selectedLocation) {
+    const locStr = selectedLocation.name || selectedLocation.address ||
+      `${selectedLocation.lat.toFixed(5)}, ${selectedLocation.lng.toFixed(5)}`;
+    suggestion = suggestion.replace('{location}', locStr);
+  } else if (suggestion.includes('{location}')) {
+    // No location selected — prompt user
+    suggestion = suggestion.replace('{location}', '');
+    addSystemMessage('💡 Click on the map to select a location first, then try again.');
   }
+
+  commandInput.value = suggestion;
+  commandInput.focus();
+  // Cursor at end
+  commandInput.setSelectionRange(suggestion.length, suggestion.length);
 });
 
 // === WEBSOCKET ===
@@ -106,6 +125,9 @@ function handleMessage(msg) {
       renderMessage(msg);
       break;
     case 'ai_response':
+      // Remove typing indicator when response arrives
+      const typingEl = document.getElementById('typing-indicator');
+      if (typingEl) typingEl.remove();
       renderMessage(msg);
       break;
     case 'presence':
@@ -115,7 +137,7 @@ function handleMessage(msg) {
       addSystemMessage(`${msg.userId} joined`);
       break;
     case 'move':
-      addSystemMessage(`${msg.userId} moved to ${msg.location?.name || 'unknown location'}`);
+      handleUserMove(msg);
       break;
     case 'drawing':
       addSystemMessage(`${msg.drawing.createdBy} added a drawing`);
@@ -138,15 +160,10 @@ function sendMessage(text) {
   }
 
   // Handle meta commands
-  if (text === '/who') {
-    showWhoTab();
-    return;
-  }
-
-  if (text === '/help') {
-    showHelpTab();
-    return;
-  }
+  if (text === '/who') { showWhoTab(); return; }
+  if (text === '/help') { showHelpTab(); return; }
+  if (text === '/where') { showLocationInfo(); return; }
+  if (text.startsWith('/goto ')) { searchAndGoto(text.slice(6).trim()); return; }
 
   // Check if invoking AI
   if (text.startsWith('@' + AI_USER) || text.startsWith('/' + AI_USER)) {
@@ -155,6 +172,283 @@ function sendMessage(text) {
     send({ type: 'chat', text });
   }
 }
+
+// === MAP ===
+
+function initMap() {
+  try {
+    map = L.map('map').setView([52.486, -1.904], 13); // Birmingham default
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap contributors',
+      maxZoom: 19
+    }).addTo(map);
+
+    // Click to select location
+    map.on('click', handleMapClick);
+
+    // Show coords on mouse move
+    map.on('mousemove', (e) => {
+      const coordsEl = document.getElementById('coords-display');
+      if (coordsEl) {
+        coordsEl.textContent = `${e.latlng.lat.toFixed(5)}, ${e.latlng.lng.toFixed(5)}`;
+      }
+    });
+
+    // Try to get user's actual location
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          const { latitude, longitude } = position.coords;
+          map.setView([latitude, longitude], 15);
+          // Auto-select current position
+          selectLocation(latitude, longitude);
+          // Notify room
+          send({
+            type: 'move',
+            location: { lat: latitude, lng: longitude, name: 'Current location' }
+          });
+        },
+        (error) => console.warn('Geolocation error:', error)
+      );
+    }
+  } catch (err) {
+    console.error('Map initialization failed:', err);
+  }
+}
+
+/**
+ * Handle map click — select a location and show region of interest
+ */
+function handleMapClick(e) {
+  selectLocation(e.latlng.lat, e.latlng.lng);
+}
+
+/**
+ * Select a location on the map with marker and ROI circle
+ */
+function selectLocation(lat, lng) {
+  selectedLocation = { lat, lng, name: null, address: null };
+
+  // Update or create marker
+  if (selectionMarker) {
+    selectionMarker.setLatLng([lat, lng]);
+  } else {
+    selectionMarker = L.marker([lat, lng], {
+      icon: L.divIcon({
+        className: 'selection-marker',
+        html: '<div class="selection-pin">📍</div>',
+        iconSize: [28, 28],
+        iconAnchor: [14, 28]
+      })
+    }).addTo(map);
+  }
+
+  // Update or create ROI circle
+  if (selectionCircle) {
+    selectionCircle.setLatLng([lat, lng]);
+  } else {
+    selectionCircle = L.circle([lat, lng], {
+      radius: ROI_RADIUS,
+      color: '#3b82f6',
+      fillColor: '#3b82f6',
+      fillOpacity: 0.1,
+      weight: 2,
+      dashArray: '6, 6'
+    }).addTo(map);
+  }
+
+  // Update display immediately with coords
+  updateLocationDisplay(`${lat.toFixed(5)}, ${lng.toFixed(5)}`, 'Looking up location...');
+
+  // Reverse geocode (debounced)
+  clearTimeout(reverseGeocodeTimeout);
+  reverseGeocodeTimeout = setTimeout(() => reverseGeocode(lat, lng), 300);
+}
+
+/**
+ * Reverse geocode coordinates to a place name via Nominatim
+ */
+async function reverseGeocode(lat, lng) {
+  try {
+    const url = `https://nominatim.openstreetmap.org/reverse?` + new URLSearchParams({
+      lat: lat.toFixed(6),
+      lon: lng.toFixed(6),
+      format: 'json',
+      addressdetails: 1,
+      zoom: 18
+    });
+
+    const response = await fetch(url, {
+      headers: { 'Accept': 'application/json' }
+    });
+
+    if (!response.ok) throw new Error('Geocoding failed');
+
+    const result = await response.json();
+
+    if (result && result.address) {
+      const addr = result.address;
+      // Build a useful place name from address components
+      const name = buildPlaceName(addr);
+      const fullAddress = result.display_name;
+
+      selectedLocation.name = name;
+      selectedLocation.address = fullAddress;
+
+      updateLocationDisplay(name, fullAddress);
+
+      // Update marker popup
+      if (selectionMarker) {
+        selectionMarker.bindPopup(`<strong>${escapeHtml(name)}</strong><br><small>${escapeHtml(fullAddress)}</small>`);
+      }
+    }
+  } catch (err) {
+    console.warn('Reverse geocoding failed:', err);
+    updateLocationDisplay(
+      `${lat.toFixed(5)}, ${lng.toFixed(5)}`,
+      'Could not resolve place name'
+    );
+  }
+}
+
+/**
+ * Build a human-readable place name from Nominatim address components
+ */
+function buildPlaceName(addr) {
+  // Try to build something like "Park Street, Digbeth, Birmingham"
+  const parts = [];
+
+  // Street-level detail
+  if (addr.road) parts.push(addr.road);
+  else if (addr.pedestrian) parts.push(addr.pedestrian);
+  else if (addr.footway) parts.push(addr.footway);
+  else if (addr.building) parts.push(addr.building);
+  else if (addr.amenity) parts.push(addr.amenity);
+
+  // Neighbourhood/suburb
+  if (addr.neighbourhood) parts.push(addr.neighbourhood);
+  else if (addr.suburb) parts.push(addr.suburb);
+  else if (addr.quarter) parts.push(addr.quarter);
+
+  // City/town
+  if (addr.city) parts.push(addr.city);
+  else if (addr.town) parts.push(addr.town);
+  else if (addr.village) parts.push(addr.village);
+  else if (addr.hamlet) parts.push(addr.hamlet);
+
+  return parts.length > 0 ? parts.join(', ') : 'Unknown location';
+}
+
+/**
+ * Update the location display bar
+ */
+function updateLocationDisplay(primary, secondary) {
+  if (locationDisplay) {
+    locationDisplay.innerHTML = `
+      <div class="location-primary">${escapeHtml(primary)}</div>
+      ${secondary ? `<div class="location-secondary">${escapeHtml(secondary)}</div>` : ''}
+    `;
+    locationDisplay.classList.add('active');
+  }
+
+  // Update command panel to show location-aware state
+  updateCommandPanelState();
+}
+
+/**
+ * Update command panel buttons to reflect whether a location is selected
+ */
+function updateCommandPanelState() {
+  const cmds = commandPanel.querySelectorAll('.cmd[data-location]');
+  cmds.forEach(cmd => {
+    if (cmd.dataset.location !== 'false') {
+      cmd.classList.toggle('location-ready', !!selectedLocation?.name);
+    }
+  });
+}
+
+/**
+ * Search for a place name and move the map there
+ */
+async function searchAndGoto(query) {
+  if (!query) {
+    addSystemMessage('Usage: /goto <place name or address>', true);
+    return;
+  }
+
+  addSystemMessage(`Searching for "${query}"...`);
+
+  try {
+    const url = `https://nominatim.openstreetmap.org/search?` + new URLSearchParams({
+      q: query,
+      format: 'json',
+      addressdetails: 1,
+      limit: 1
+    });
+
+    const response = await fetch(url, {
+      headers: { 'Accept': 'application/json' }
+    });
+
+    const results = await response.json();
+
+    if (results.length === 0) {
+      addSystemMessage(`No results found for "${query}"`, true);
+      return;
+    }
+
+    const result = results[0];
+    const lat = parseFloat(result.lat);
+    const lng = parseFloat(result.lon);
+
+    map.setView([lat, lng], 16, { animate: true });
+    selectLocation(lat, lng);
+    addSystemMessage(`📍 ${result.display_name}`);
+  } catch (err) {
+    addSystemMessage('Search failed: ' + err.message, true);
+  }
+}
+
+/**
+ * Show current location info in chat
+ */
+function showLocationInfo() {
+  if (!selectedLocation) {
+    addSystemMessage('No location selected. Click on the map to select one.');
+    return;
+  }
+  const name = selectedLocation.name || 'Unnamed';
+  const coords = `${selectedLocation.lat.toFixed(5)}, ${selectedLocation.lng.toFixed(5)}`;
+  addSystemMessage(`📍 ${name} (${coords}) — ROI: ${ROI_RADIUS}m radius`);
+}
+
+// === HANDLE USER MOVEMENT ===
+
+const userMarkers = new Map();
+
+function handleUserMove(msg) {
+  if (!map || !msg.location) return;
+  const { lat, lng } = msg.location;
+
+  addSystemMessage(`${msg.userId} moved to ${msg.location.name || `${lat.toFixed(4)}, ${lng.toFixed(4)}`}`);
+
+  // Update or create marker for this user
+  if (userMarkers.has(msg.userId)) {
+    userMarkers.get(msg.userId).setLatLng([lat, lng]);
+  } else {
+    const marker = L.circleMarker([lat, lng], {
+      radius: 6,
+      color: '#22c55e',
+      fillColor: '#22c55e',
+      fillOpacity: 0.8,
+      weight: 2
+    }).addTo(map).bindTooltip(msg.userId, { permanent: false, direction: 'top' });
+    userMarkers.set(msg.userId, marker);
+  }
+}
+
+// === MESSAGE RENDERING ===
 
 function renderMessage(msg) {
   const div = document.createElement('div');
@@ -219,6 +513,8 @@ function showTyping(userId) {
   }, 30000);
 }
 
+// === PRESENCE ===
+
 function updatePresence(users) {
   presenceListEl.innerHTML = '';
   users.forEach(user => {
@@ -266,15 +562,9 @@ auxTabs.forEach(tab => {
 
 function switchTab(tabName) {
   switch (tabName) {
-    case 'activity':
-      showActivityTab();
-      break;
-    case 'users':
-      showUsersTab();
-      break;
-    case 'help':
-      showHelpTab();
-      break;
+    case 'activity': showActivityTab(); break;
+    case 'users': showUsersTab(); break;
+    case 'help': showHelpTab(); break;
   }
 }
 
@@ -294,15 +584,11 @@ function showUsersTab() {
       <div id="aux-presence-list"></div>
     </div>
   `;
-  // Mirror presence from sidebar
-  const auxPresence = document.getElementById('aux-presence-list');
-  auxPresence.innerHTML = presenceListEl.innerHTML;
+  document.getElementById('aux-presence-list').innerHTML = presenceListEl.innerHTML;
 }
 
 function showWhoTab() {
-  // Activate users tab and switch to it
-  const usersTab = document.querySelector('[data-tab="users"]');
-  usersTab.click();
+  document.querySelector('[data-tab="users"]').click();
 }
 
 function showHelpTab() {
@@ -310,79 +596,34 @@ function showHelpTab() {
     <div>
       <h3 style="margin-bottom: 12px; font-size: 14px; font-weight: 600;">Field Room Help</h3>
       <div style="color: var(--text-secondary); font-size: 13px; line-height: 1.6;">
-        <p style="margin-bottom: 12px;"><strong>Welcome to Field Room</strong> — a collaborative workspace where you work alongside Clawdbot.</p>
-        
-        <p style="margin-bottom: 8px;"><strong>Chat:</strong> Type messages to communicate with others in the room.</p>
-        
-        <p style="margin-bottom: 8px;"><strong>Invoke AI:</strong> Mention <code>@${AI_USER}</code> to get AI assistance:</p>
+        <p style="margin-bottom: 12px;"><strong>Welcome to Field Room</strong> — a collaborative workspace with AI assistance.</p>
+
+        <p style="margin-bottom: 8px;"><strong>Map:</strong> Click anywhere to select a location. A region of interest (${ROI_RADIUS}m radius) will be shown. Commands will use this location automatically.</p>
+
+        <p style="margin-bottom: 8px;"><strong>AI:</strong> Mention <code>@${AI_USER}</code> or use the command buttons:</p>
         <ul style="margin-left: 20px; margin-bottom: 12px;">
-          <li>@${AI_USER} survey this area</li>
-          <li>@${AI_USER} research planning constraints</li>
-          <li>@${AI_USER} summarize our discussion</li>
+          <li>@${AI_USER} survey this area — analyses the selected location</li>
+          <li>@${AI_USER} research planning constraints — checks planning data</li>
+          <li>@${AI_USER} what's nearby? — points of interest</li>
         </ul>
-        
+
         <p style="margin-bottom: 8px;"><strong>Commands:</strong></p>
         <ul style="margin-left: 20px;">
-          <li><code>/who</code> - Show who's online</li>
-          <li><code>/help</code> - Show this help</li>
+          <li><code>/goto &lt;place&gt;</code> — Search and jump to a location</li>
+          <li><code>/where</code> — Show current selected location</li>
+          <li><code>/who</code> — Show who's online</li>
+          <li><code>/help</code> — Show this help</li>
         </ul>
-        
-        <p style="margin-top: 12px; font-size: 12px; opacity: 0.7;">The AI sees recent conversation context and can help with research, analysis, and collaboration.</p>
       </div>
     </div>
   `;
 }
 
-// === MAP ===
-
-function initMap() {
-  try {
-    map = L.map('map').setView([52.486, -1.904], 13); // Birmingham, UK default
-
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '© OpenStreetMap contributors',
-      maxZoom: 19
-    }).addTo(map);
-
-    // Try to get user's location
-    if (navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(
-        (position) => {
-          const { latitude, longitude } = position.coords;
-          map.setView([latitude, longitude], 15);
-          
-          // Add marker for user
-          L.marker([latitude, longitude])
-            .addTo(map)
-            .bindPopup(`${currentUserId} (you)`)
-            .openPopup();
-            
-          // Notify room of location
-          send({
-            type: 'move',
-            location: {
-              lat: latitude,
-              lng: longitude,
-              name: 'Current location'
-            }
-          });
-        },
-        (error) => {
-          console.warn('Geolocation error:', error);
-        }
-      );
-    }
-  } catch (err) {
-    console.error('Map initialization failed:', err);
-  }
-}
-
-// === RESIZE HANDLES ===
+// === MAP RESIZE HANDLES ===
 
 const resizeHandleColumns = document.getElementById('resize-handle-columns');
 const resizeHandlePanels = document.getElementById('resize-handle-panels');
 const textColumn = document.getElementById('text-column');
-const mapSection = document.getElementById('map-section');
 const auxPanel = document.getElementById('aux-panel');
 
 let isResizingColumns = false;
@@ -404,7 +645,6 @@ document.addEventListener('mousemove', (e) => {
     textColumn.style.width = newWidth + 'px';
     if (map) setTimeout(() => map.invalidateSize(), 100);
   }
-  
   if (isResizingPanels) {
     const container = document.querySelector('.right-column');
     const containerRect = container.getBoundingClientRect();
@@ -423,6 +663,13 @@ document.addEventListener('mouseup', () => {
 });
 
 // === UTILITIES ===
+
+function escapeHtml(text) {
+  if (!text) return '';
+  const d = document.createElement('div');
+  d.textContent = text;
+  return d.innerHTML;
+}
 
 function send(message) {
   if (ws && ws.readyState === WebSocket.OPEN) {
@@ -443,5 +690,5 @@ window.addEventListener('beforeunload', () => {
   if (reconnectTimer) clearTimeout(reconnectTimer);
 });
 
-// Initialize help tab by default
+// Initialize default tab
 showActivityTab();

@@ -34,16 +34,18 @@
       <!-- Command Reference Panel -->
       <div class="command-panel" id="command-panel">
         <div class="command-group">
-          <span class="command-group-title">Ask AI</span>
-          <span class="cmd" data-suggest="@{ai} survey this area" title="Request location analysis">survey</span>
-          <span class="cmd" data-suggest="@{ai} summarize our discussion" title="Get conversation summary">summarize</span>
-          <span class="cmd" data-suggest="@{ai} what do you think about" title="Get AI opinion">opinion</span>
-          <span class="cmd" data-suggest="@{ai} research" title="Deep research query">research</span>
+          <span class="command-group-title">📍 Location</span>
+          <span class="cmd" data-suggest="@{ai} survey the area around {location}" data-location="true" title="Analyse the selected location">survey</span>
+          <span class="cmd" data-suggest="@{ai} what planning constraints apply near {location}?" data-location="true" title="Check planning data">planning</span>
+          <span class="cmd" data-suggest="@{ai} what's nearby {location}?" data-location="true" title="Points of interest">nearby</span>
+          <span class="cmd" data-suggest="@{ai} research the history of {location}" data-location="true" title="Historical research">history</span>
         </div>
         <div class="command-group">
-          <span class="command-group-title">Collaborate</span>
-          <span class="cmd" data-suggest="/who" title="Who's online">/who</span>
-          <span class="cmd" data-suggest="/help" title="Show help">/help</span>
+          <span class="command-group-title">💬 General</span>
+          <span class="cmd" data-suggest="@{ai} summarize our discussion" data-location="false" title="Get conversation summary">summarize</span>
+          <span class="cmd" data-suggest="@{ai} " data-location="false" title="Ask anything">ask...</span>
+          <span class="cmd" data-suggest="/goto " data-location="false" title="Jump to a place">/goto</span>
+          <span class="cmd" data-suggest="/help" data-location="false" title="Show help">/help</span>
         </div>
       </div>
 
@@ -80,16 +82,17 @@
 
     <!-- Right Column: Map + Auxiliary Panel -->
     <div class="right-column" id="right-column">
+      <!-- Location Display -->
+      <div class="location-bar" id="location-display">
+        <div class="location-primary">Click on the map to select a location</div>
+      </div>
+
       <!-- Map Section -->
       <div class="map-section" id="map-section">
-        <div id="map">
-          <p>Map will appear here</p>
-        </div>
+        <div id="map"></div>
 
-        <!-- Map Controls (to be added) -->
-        <div class="map-controls" style="position: absolute; top: 10px; right: 10px; z-index: 400; display: none;">
-          <button id="center-btn" title="Center on your location">📍</button>
-        </div>
+        <!-- Coordinates overlay -->
+        <div class="coords-overlay" id="coords-display">—</div>
       </div>
 
       <!-- Resize Handle: Map/Panel -->

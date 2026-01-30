@@ -458,6 +458,83 @@ body {
   background: var(--accent-hover);
 }
 
+/* === LOCATION BAR === */
+
+.location-bar {
+  padding: 8px 16px;
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  min-height: 36px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.location-bar .location-primary {
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.location-bar .location-secondary {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 2px;
+}
+
+.location-bar.active {
+  background: #eff6ff;
+  border-bottom-color: var(--accent);
+}
+
+/* === COORDS OVERLAY === */
+
+.coords-overlay {
+  position: absolute;
+  bottom: 8px;
+  left: 8px;
+  z-index: 400;
+  background: rgba(255, 255, 255, 0.9);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: monospace;
+  color: var(--text-secondary);
+  pointer-events: none;
+}
+
+/* === SELECTION MARKER === */
+
+.selection-marker {
+  background: none;
+  border: none;
+}
+
+.selection-pin {
+  font-size: 24px;
+  filter: drop-shadow(0 2px 2px rgba(0,0,0,0.3));
+}
+
+/* === LOCATION-AWARE COMMANDS === */
+
+.cmd[data-location="true"] {
+  opacity: 0.6;
+  border-style: dashed;
+}
+
+.cmd[data-location="true"].location-ready {
+  opacity: 1;
+  border-style: solid;
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 /* === UTILITIES === */
 
 .hidden {
